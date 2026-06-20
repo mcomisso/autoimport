@@ -76,6 +76,62 @@ struct AppStoreTests {
     }
 
     @Test
+    func refreshSourcesToleratesDuplicateImageCaptureNames() {
+        let firstImageCaptureSource = SourceDevice(
+            id: "image-capture-a",
+            displayName: "DJI Camera",
+            kind: .imageCaptureDevice,
+            rootURL: nil,
+            subtitle: "Connected",
+            state: .ready
+        )
+        let secondImageCaptureSource = SourceDevice(
+            id: "image-capture-b",
+            displayName: "DJI Camera",
+            kind: .imageCaptureDevice,
+            rootURL: nil,
+            subtitle: "Connected",
+            state: .ready
+        )
+        let mountedSource = SourceDevice(
+            id: "volume",
+            displayName: "DJI Camera",
+            kind: .mountedVolume,
+            rootURL: URL(fileURLWithPath: "/Volumes/DJI"),
+            subtitle: "Mounted",
+            state: .ready
+        )
+
+        let imageCaptureOnlyStore = AppStore(
+            discoverVolumeSources: { [] },
+            discoverImageCaptureSources: { [firstImageCaptureSource, secondImageCaptureSource] },
+            scanSource: { _ in [] },
+            groupAssets: { _ in CaptureGroupingResult(captures: [], unknownFolders: []) },
+            duplicateStateResolver: { _, _, _, _ in [:] },
+            importCapturesAction: { _, _, _, _, _, _ in ImportSessionResult(captureResults: []) },
+            deleteCaptureFilesAction: { _ in }
+        )
+
+        imageCaptureOnlyStore.refreshSources()
+
+        #expect(imageCaptureOnlyStore.sources.map(\.id) == ["image-capture-a"])
+
+        let mountedVolumeStore = AppStore(
+            discoverVolumeSources: { [mountedSource] },
+            discoverImageCaptureSources: { [firstImageCaptureSource, secondImageCaptureSource] },
+            scanSource: { _ in [] },
+            groupAssets: { _ in CaptureGroupingResult(captures: [], unknownFolders: []) },
+            duplicateStateResolver: { _, _, _, _ in [:] },
+            importCapturesAction: { _, _, _, _, _, _ in ImportSessionResult(captureResults: []) },
+            deleteCaptureFilesAction: { _ in }
+        )
+
+        mountedVolumeStore.refreshSources()
+
+        #expect(mountedVolumeStore.sources.map(\.id) == ["volume"])
+    }
+
+    @Test
     func persistsDestinationAndOrganizationModeAcrossStoreInstances() {
         let suiteName = "AppStoreTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

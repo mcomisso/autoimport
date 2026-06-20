@@ -972,7 +972,13 @@ final class AppStore {
         imageCaptureSources: [SourceDevice],
         folderSources: [SourceDevice]
     ) -> [SourceDevice] {
-        var mergedByName = Dictionary(uniqueKeysWithValues: imageCaptureSources.map { (normalizedName($0.displayName), $0) })
+        var mergedByName: [String: SourceDevice] = [:]
+        for imageCaptureSource in imageCaptureSources {
+            let name = normalizedName(imageCaptureSource.displayName)
+            if mergedByName[name] == nil {
+                mergedByName[name] = imageCaptureSource
+            }
+        }
 
         for volumeSource in volumeSources {
             mergedByName[normalizedName(volumeSource.displayName)] = volumeSource
