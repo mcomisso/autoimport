@@ -17,11 +17,11 @@ struct InspectorView: View {
                     )
                 } else if let unknownFolder {
                     UnknownFolderInspectorContent(unknownFolder: unknownFolder)
-                } else {
-                    InspectorEmptyStateView()
-                }
+            } else {
+                InspectorEmptyStateView()
             }
-            .padding(24)
+        }
+        .padding(20)
         }
         .navigationTitle("Inspector")
     }
@@ -59,10 +59,17 @@ private struct CapturePreviewSection: View {
     let previewFileURL: URL?
 
     var body: some View {
+        ViewThatFits(in: .horizontal) {
+            preview(size: CGSize(width: 320, height: 196))
+            preview(size: CGSize(width: 280, height: 172))
+        }
+    }
+
+    private func preview(size: CGSize) -> some View {
         CaptureThumbnailView(
             thumbnailFileURL: thumbnailFileURL,
             previewFileURL: previewFileURL,
-            size: CGSize(width: 320, height: 196),
+            size: size,
             cornerRadius: 14,
             previewPresentation: .inlinePlayableVideo
         )
@@ -395,6 +402,13 @@ private struct UnknownFolderInspectorContent: View {
 
 private struct UnknownFolderPreview: View {
     var body: some View {
+        ViewThatFits(in: .horizontal) {
+            preview(size: CGSize(width: 320, height: 196))
+            preview(size: CGSize(width: 280, height: 172))
+        }
+    }
+
+    private func preview(size: CGSize) -> some View {
         RoundedRectangle(cornerRadius: 14, style: .continuous)
             .fill(.quaternary)
             .overlay {
@@ -402,7 +416,7 @@ private struct UnknownFolderPreview: View {
                     .font(.system(size: 58))
                     .foregroundStyle(.secondary)
             }
-            .frame(width: 320, height: 196)
+            .frame(width: size.width, height: size.height)
     }
 }
 

@@ -27,101 +27,193 @@ struct DestinationToolbarView: View {
     }
 
     private var mainRow: some View {
+        ViewThatFits(in: .horizontal) {
+            expandedMainRow
+            compactMainRows
+        }
+    }
+
+    private var expandedMainRow: some View {
         HStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Import To")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            destinationControl(maxWidth: 360)
 
-                Button(action: onChooseDestination) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "folder.fill")
-                            .foregroundStyle(destinationIconColor)
-
-                        Text(store.destinationURL?.path(percentEncoded: false) ?? "Choose destination")
-                            .lineLimit(1)
-                            .foregroundStyle(destinationTextColor)
-                            .frame(maxWidth: 360, alignment: .leading)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .background(.quinary, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-
-            Picker("Organize", selection: $store.organizationMode) {
-                Text("Flat").tag(DestinationOrganizationMode.flat)
-                Text("By Date").tag(DestinationOrganizationMode.byDate)
-                Text("Camera / Date").tag(DestinationOrganizationMode.byCameraAndDate)
-            }
-            .pickerStyle(.menu)
-            .frame(width: 150)
-
-            Toggle("Unknown Folders", isOn: $store.showUnknownFolders)
-                .toggleStyle(.switch)
-                .frame(width: 170)
-
-            AutomaticImportToggle(isOn: $store.automaticallyImportDetectedMedia)
+            organizationControls
 
             Spacer()
 
-            VStack(alignment: .trailing, spacing: 4) {
-                Text(markedSummary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            actionGroup(alignment: .trailing)
+        }
+    }
 
-                HStack(spacing: 10) {
-                    Button {
-                        store.selectAllCaptures()
-                    } label: {
-                        Label("Select All", systemImage: "checkmark.square")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                    .disabled(!store.canSelectAllCaptures)
+    private var compactMainRows: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 14) {
+                    destinationControl(maxWidth: .infinity)
 
-                    Button {
-                        store.clearCaptureSelection()
-                    } label: {
-                        Label("Deselect All", systemImage: "square")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                    .disabled(!store.canDeselectAllCaptures)
+                    Spacer(minLength: 0)
 
-                    Button {
-                        onImportAll()
-                    } label: {
-                        Label("Import All", systemImage: "tray.and.arrow.down")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                    .disabled(!store.canImportAllCaptures)
+                    organizationControls
+                }
 
-                    Button {
-                        onImportSelected()
-                    } label: {
-                        HStack(spacing: 8) {
-                            if store.isImporting {
-                                ProgressView()
-                                    .controlSize(.small)
-                                    .progressViewStyle(.circular)
-                                    .tint(.white)
-                            } else {
-                                Image(systemName: "square.and.arrow.down.fill")
-                            }
-                            Text(store.isImporting ? "Importing…" : "Import Selected")
-                                .fontWeight(.semibold)
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .keyboardShortcut(.return, modifiers: [.command])
-                    .disabled(!store.canImportSelection)
+                VStack(alignment: .leading, spacing: 10) {
+                    destinationControl(maxWidth: .infinity)
+                    organizationControls
+                }
+            }
+
+            actionGroup(alignment: .leading)
+        }
+    }
+
+    private func destinationControl(maxWidth: CGFloat?) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Import To")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button(action: onChooseDestination) {
+                HStack(spacing: 8) {
+                    Image(systemName: "folder.fill")
+                        .foregroundStyle(destinationIconColor)
+
+                    Text(store.destinationURL?.path(percentEncoded: false) ?? "Choose destination")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(destinationTextColor)
+                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(.quinary, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(minWidth: 180, maxWidth: maxWidth, alignment: .leading)
+    }
+
+    private var organizationControls: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                organizationPicker
+                unknownFoldersToggle
+                AutomaticImportToggle(isOn: $store.automaticallyImportDetectedMedia)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                organizationPicker
+
+                HStack(spacing: 12) {
+                    unknownFoldersToggle
+                    AutomaticImportToggle(isOn: $store.automaticallyImportDetectedMedia)
                 }
             }
         }
+    }
+
+    private var organizationPicker: some View {
+        Picker("Organize", selection: $store.organizationMode) {
+            Text("Flat").tag(DestinationOrganizationMode.flat)
+            Text("By Date").tag(DestinationOrganizationMode.byDate)
+            Text("Camera / Date").tag(DestinationOrganizationMode.byCameraAndDate)
+        }
+        .pickerStyle(.menu)
+        .frame(width: 150)
+    }
+
+    private var unknownFoldersToggle: some View {
+        Toggle("Unknown Folders", isOn: $store.showUnknownFolders)
+            .toggleStyle(.switch)
+            .frame(width: 170)
+    }
+
+    private func actionGroup(alignment: HorizontalAlignment) -> some View {
+        VStack(alignment: alignment, spacing: 4) {
+            Text(markedSummary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            actionButtons
+        }
+    }
+
+    private var actionButtons: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                selectAllButton
+                deselectAllButton
+                importAllButton
+                importSelectedButton
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    selectAllButton
+                    deselectAllButton
+                }
+
+                HStack(spacing: 10) {
+                    importAllButton
+                    importSelectedButton
+                }
+            }
+        }
+    }
+
+    private var selectAllButton: some View {
+        Button {
+            store.selectAllCaptures()
+        } label: {
+            Label("Select All", systemImage: "checkmark.square")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .disabled(!store.canSelectAllCaptures)
+    }
+
+    private var deselectAllButton: some View {
+        Button {
+            store.clearCaptureSelection()
+        } label: {
+            Label("Deselect All", systemImage: "square")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .disabled(!store.canDeselectAllCaptures)
+    }
+
+    private var importAllButton: some View {
+        Button {
+            onImportAll()
+        } label: {
+            Label("Import All", systemImage: "tray.and.arrow.down")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .disabled(!store.canImportAllCaptures)
+    }
+
+    private var importSelectedButton: some View {
+        Button {
+            onImportSelected()
+        } label: {
+            HStack(spacing: 8) {
+                if store.isImporting {
+                    ProgressView()
+                        .controlSize(.small)
+                        .progressViewStyle(.circular)
+                        .tint(.white)
+                } else {
+                    Image(systemName: "square.and.arrow.down.fill")
+                }
+                Text(store.isImporting ? "Importing…" : "Import Selected")
+                    .fontWeight(.semibold)
+            }
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .keyboardShortcut(.return, modifiers: [.command])
+        .disabled(!store.canImportSelection)
     }
 
     @ViewBuilder

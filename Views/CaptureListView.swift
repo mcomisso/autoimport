@@ -188,33 +188,33 @@ private struct CaptureTableView: View {
                     )
                 )
             }
-            .width(min: 360, ideal: 420)
+            .width(min: 240, ideal: 420)
 
             TableColumn("Kind", value: \.kindSortValue) { item in
                 Text(item.kindText)
                     .opacity(item.isDuplicate ? 0.46 : 1)
             }
-            .width(min: 90, ideal: 110)
+            .width(min: 64, ideal: 110)
 
             TableColumn("Date", value: \.modificationDateSortValue) { item in
                 Text(item.timestampText)
                     .foregroundStyle(.secondary)
                     .opacity(item.isDuplicate ? 0.46 : 1)
             }
-            .width(min: 140, ideal: 180)
+            .width(min: 104, ideal: 180)
 
             TableColumn("Size", value: \.sizeSortValue) { item in
                 Text(item.sizeText)
                     .opacity(item.isDuplicate ? 0.46 : 1)
             }
-            .width(min: 90, ideal: 110)
+            .width(min: 70, ideal: 110)
 
             TableColumn("Status", value: \.statusSortValue) { item in
                 Text(item.statusText)
                     .foregroundStyle(.secondary)
                     .opacity(item.isDuplicate ? 0.46 : 1)
             }
-            .width(min: 110, ideal: 150)
+            .width(min: 84, ideal: 150)
         } rows: {
             ForEach(rows) { item in
                 TableRow(item)
