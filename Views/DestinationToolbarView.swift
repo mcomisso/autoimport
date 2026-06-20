@@ -62,6 +62,8 @@ struct DestinationToolbarView: View {
                 .toggleStyle(.switch)
                 .frame(width: 170)
 
+            AutomaticImportToggle(isOn: $store.automaticallyImportDetectedMedia)
+
             Spacer()
 
             VStack(alignment: .trailing, spacing: 4) {
@@ -181,4 +183,15 @@ struct DestinationToolbarView: View {
         store.destinationAvailability == .unavailable ? .red : .primary
     }
 
+}
+
+private struct AutomaticImportToggle: View {
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle("Auto Import", isOn: $isOn)
+            .toggleStyle(.switch)
+            .frame(width: 145)
+            .help("Automatically import new mounted media when it is detected.")
+    }
 }

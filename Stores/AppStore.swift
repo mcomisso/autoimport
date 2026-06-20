@@ -121,6 +121,13 @@ struct CaptureRowPresentation: Identifiable, Hashable, Sendable {
     }
 }
 
+private struct AutomaticImportAttemptKey: Hashable, Sendable {
+    let sourceID: String
+    let destinationPath: String
+    let organizationModeRawValue: String
+    let captureIDs: [String]
+}
+
 @MainActor
 @Observable
 final class AppStore {
@@ -151,6 +158,9 @@ final class AppStore {
     private var sourceLoadingGeneration = 0
     private var duplicateDetectionTask: Task<Void, Never>?
     private var duplicateDetectionGeneration = 0
+    private var duplicateStatesAreResolved = false
+    private var automaticImportTask: Task<Void, Never>?
+    private var lastAutomaticImportAttemptKey: AutomaticImportAttemptKey?
     private var destinationCapacityTask: Task<Void, Never>?
     private var destinationCapacityGeneration = 0
     private var sourceEjectionTask: Task<Void, Never>?
@@ -189,6 +199,16 @@ final class AppStore {
     var showHelperFiles: Bool {
         didSet {
             preferences.saveShowHelperFiles(showHelperFiles)
+        }
+    }
+    var automaticallyImportDetectedMedia: Bool {
+        didSet {
+            preferences.saveAutomaticallyImportDetectedMedia(automaticallyImportDetectedMedia)
+            if automaticallyImportDetectedMedia {
+                scheduleAutomaticImportForCurrentSource()
+            } else {
+                lastAutomaticImportAttemptKey = nil
+            }
         }
     }
     var destinationURL: URL? {
@@ -280,6 +300,7 @@ final class AppStore {
         self.destinationURL = preferences.destinationURL()
         self.organizationMode = preferences.organizationMode()
         self.showHelperFiles = preferences.showHelperFiles()
+        self.automaticallyImportDetectedMedia = preferences.automaticallyImportDetectedMedia()
         updateDestinationAvailability()
         refreshDestinationCapacity()
     }
@@ -376,6 +397,25 @@ final class AppStore {
             ?? combined.first
     }
 
+    func refreshSourcesAndLoadPreferredSource(preferNewDetectedMedia: Bool = false) {
+        let previousSourceIDs = Set(sources.map(\.id))
+        refreshSources()
+
+        let newDetectedMedia = sources.first { source in
+            preferNewDetectedMedia
+                && automaticallyImportDetectedMedia
+                && !previousSourceIDs.contains(source.id)
+                && isAutomaticImportSource(source)
+        }
+        let sourceToLoad = newDetectedMedia ?? selectedSource ?? sources.first
+
+        if let sourceToLoad {
+            loadSource(sourceToLoad)
+        } else {
+            clearLoadedSource()
+        }
+    }
+
     func loadSource(_ source: SourceDevice) {
         sourceLoadingTask?.cancel()
         sourceLoadingGeneration += 1
@@ -389,6 +429,7 @@ final class AppStore {
         lastImportResult = nil
         selectedCaptureIDs = []
         duplicateStatesByCaptureID = [:]
+        duplicateStatesAreResolved = false
         refreshCaptureRows()
 
         let scanSource = scanSource
@@ -412,6 +453,10 @@ final class AppStore {
     func awaitDuplicateDetection() async {
         await sourceLoadingTask?.value
         await duplicateDetectionTask?.value
+    }
+
+    func awaitAutomaticImport() async {
+        await automaticImportTask?.value
     }
 
     func awaitSourceEjection() async {
@@ -485,59 +530,12 @@ final class AppStore {
     }
 
     func importSelectedCaptures(overwriteDuplicates: Bool) async {
-        refreshDestinationAvailability()
-
         let capturesSnapshot = selectedCaptures
-        guard
-            let destinationURL,
-            destinationAvailability.isReachable,
-            !capturesSnapshot.isEmpty,
-            !isImporting
-        else {
-            return
-        }
-
-        let cameraName = selectedSource?.displayName ?? "Imports"
-        let mode = organizationMode
-        let action = importCapturesAction
-
-        isImporting = true
-        importProgress = ImportProgress(
-            completedCaptures: 0,
-            totalCaptures: capturesSnapshot.count,
-            completedBytes: 0,
-            totalBytes: plannedImportByteCount(
-                for: capturesSnapshot,
-                overwriteDuplicates: overwriteDuplicates
-            ),
-            currentCaptureName: capturesSnapshot.first?.displayName
-        )
-        defer {
-            isImporting = false
-            importProgress = nil
-        }
-
-        let progressHandler: ImportProgressHandler = { [weak self] progress in
-            Task { @MainActor [weak self] in
-                self?.importProgress = progress
-            }
-        }
-
-        let result = await action(
+        await importCaptures(
             capturesSnapshot,
-            destinationURL,
-            mode,
-            cameraName,
-            overwriteDuplicates,
-            progressHandler
+            from: selectedSource,
+            overwriteDuplicates: overwriteDuplicates
         )
-
-        lastImportResult = result
-        pendingDeletionCaptureIDs = result.captureResults
-            .filter(\.isDeleteEligible)
-            .map(\.captureID)
-        refreshDuplicateStates()
-        refreshDestinationCapacity()
     }
 
     private func plannedImportByteCount(
@@ -685,6 +683,7 @@ final class AppStore {
         sourceLoadingGeneration += 1
         duplicateDetectionTask?.cancel()
         duplicateDetectionGeneration += 1
+        duplicateStatesAreResolved = false
 
         selectedSource = nil
         isLoadingSource = false
@@ -742,6 +741,7 @@ final class AppStore {
     private func refreshDuplicateStates(preselectNonDuplicates: Bool = false) {
         duplicateDetectionTask?.cancel()
         duplicateDetectionGeneration += 1
+        duplicateStatesAreResolved = false
         let generation = duplicateDetectionGeneration
 
         guard let destinationURL, destinationAvailability.isReachable else {
@@ -781,12 +781,132 @@ final class AppStore {
         }
 
         duplicateStatesByCaptureID = states
+        duplicateStatesAreResolved = true
         refreshCaptureRows()
         if preselectNonDuplicates {
             selectedCaptureIDs = capturesSnapshot
                 .filter { (states[$0.id] ?? .unique) != .duplicate }
                 .map(\.id)
         }
+        scheduleAutomaticImportIfNeeded(
+            capturesSnapshot: capturesSnapshot,
+            states: states
+        )
+    }
+
+    private func scheduleAutomaticImportForCurrentSource() {
+        guard duplicateStatesAreResolved else {
+            return
+        }
+
+        scheduleAutomaticImportIfNeeded(
+            capturesSnapshot: captures,
+            states: duplicateStatesByCaptureID
+        )
+    }
+
+    private func scheduleAutomaticImportIfNeeded(
+        capturesSnapshot: [LogicalCapture],
+        states: [String: CaptureDuplicateState]
+    ) {
+        guard
+            automaticallyImportDetectedMedia,
+            automaticImportTask == nil,
+            !isImporting,
+            let source = selectedSource,
+            source.kind == .mountedVolume,
+            source.rootURL != nil,
+            let destinationURL,
+            destinationAvailability.isReachable
+        else {
+            return
+        }
+
+        let importableCaptures = capturesSnapshot.filter { capture in
+            (states[capture.id] ?? .unique) == .unique
+        }
+        guard !importableCaptures.isEmpty else {
+            return
+        }
+
+        let key = AutomaticImportAttemptKey(
+            sourceID: source.id,
+            destinationPath: destinationURL.standardizedFileURL.path(percentEncoded: false),
+            organizationModeRawValue: organizationMode.rawValue,
+            captureIDs: importableCaptures.map(\.id)
+        )
+        guard key != lastAutomaticImportAttemptKey else {
+            return
+        }
+
+        lastAutomaticImportAttemptKey = key
+        automaticImportTask = Task { [weak self] in
+            await self?.importCaptures(
+                importableCaptures,
+                from: source,
+                overwriteDuplicates: false
+            )
+            self?.automaticImportTask = nil
+        }
+    }
+
+    private func importCaptures(
+        _ capturesSnapshot: [LogicalCapture],
+        from source: SourceDevice?,
+        overwriteDuplicates: Bool
+    ) async {
+        refreshDestinationAvailability()
+
+        guard
+            let destinationURL,
+            destinationAvailability.isReachable,
+            !capturesSnapshot.isEmpty,
+            !isImporting
+        else {
+            return
+        }
+
+        let cameraName = source?.displayName ?? "Imports"
+        let mode = organizationMode
+        let action = importCapturesAction
+
+        isImporting = true
+        importProgress = ImportProgress(
+            completedCaptures: 0,
+            totalCaptures: capturesSnapshot.count,
+            completedBytes: 0,
+            totalBytes: plannedImportByteCount(
+                for: capturesSnapshot,
+                overwriteDuplicates: overwriteDuplicates
+            ),
+            currentCaptureName: capturesSnapshot.first?.displayName
+        )
+        defer {
+            isImporting = false
+            importProgress = nil
+        }
+
+        let progressHandler: ImportProgressHandler = { [weak self] progress in
+            Task { @MainActor [weak self] in
+                self?.importProgress = progress
+            }
+        }
+
+        let result = await action(
+            capturesSnapshot,
+            destinationURL,
+            mode,
+            cameraName,
+            overwriteDuplicates,
+            progressHandler
+        )
+
+        lastImportResult = result
+        pendingDeletionCaptureIDs = result.captureResults
+            .filter(\.isDeleteEligible)
+            .map(\.captureID)
+        refreshDuplicateStates()
+        refreshDestinationCapacity()
     }
 
     private func refreshDestinationCapacity() {
@@ -886,5 +1006,9 @@ final class AppStore {
 
     private func normalizedName(_ name: String) -> String {
         name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private func isAutomaticImportSource(_ source: SourceDevice) -> Bool {
+        source.kind == .mountedVolume && source.rootURL != nil
     }
 }

@@ -35,7 +35,7 @@ struct ContentView: View {
         NavigationSplitView {
             SidebarView(
                 store: store,
-                onRefresh: refreshSources,
+                onRefresh: { refreshSources() },
                 onAddFolder: chooseSourceFolder
             )
         } detail: {
@@ -95,8 +95,13 @@ struct ContentView: View {
             guard !isRunningTests else {
                 return
             }
-            refreshSources()
+            refreshSources(preferNewDetectedMedia: true)
         }
+        .mountedMediaNotifications(
+            isEnabled: !isRunningTests,
+            onMount: { refreshSources(preferNewDetectedMedia: true) },
+            onUnmount: { refreshSources() }
+        )
         .onChange(of: store.captureIDs) { _, captureIDs in
             let validIDs = Set(captureIDs)
             tableSelection = tableSelection.intersection(validIDs)
@@ -109,87 +114,21 @@ struct ContentView: View {
         .onChange(of: store.pendingDeletionCaptureIDs) { _, pendingDeletionCaptureIDs in
             showingDeleteConfirmation = !pendingDeletionCaptureIDs.isEmpty
         }
-        .alert("Overwrite existing imports?", isPresented: $showingOverwriteConfirmation) {
-            Button("Cancel", role: .cancel) {
-                importAllRequested = false
-            }
-            Button("Overwrite") {
-                if importAllRequested {
-                    store.selectAllCaptures()
-                }
-
-                store.refreshDestinationAvailability()
-                guard store.canImportSelection else {
-                    importAllRequested = false
-                    return
-                }
-
-                Task {
-                    await store.importSelectedCaptures(overwriteDuplicates: true)
-                }
-                importAllRequested = false
-            }
-            .disabled(!store.canImportSelection)
-        } message: {
-            Text("Some selected captures are already present in the destination. Overwriting will replace the existing files.")
-        }
-        .alert("Delete imported files from source?", isPresented: $showingDeleteConfirmation) {
-            Button("Keep Files", role: .cancel) {
-                store.dismissPendingDeletion()
-            }
-            Button("Delete") {
-                Task {
-                    await store.deleteImportedCapturesFromSource()
-                }
-            }
-        } message: {
-            Text("Only captures that imported successfully will be removed from the source.")
-        }
-        .alert("Clear sidecar files?", isPresented: $showingClearSidecarConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Clear sidecar files", role: .destructive) {
-                Task {
-                    await store.clearSidecarFilesFromSelectedSource()
-                }
-            }
-        } message: {
-            Text(clearSidecarConfirmationMessage)
-        }
-        .alert(deleteCaptureConfirmationTitle, isPresented: $showingCaptureSourceDeletionConfirmation) {
-            Button("Cancel", role: .cancel) {
-                captureIDsPendingSourceDeletion = []
-            }
-            Button(deleteCaptureConfirmationButtonTitle, role: .destructive) {
-                let captureIDs = captureIDsPendingSourceDeletion
-                guard !captureIDs.isEmpty else {
-                    return
-                }
-
-                captureIDsPendingSourceDeletion = []
-                Task {
-                    await store.deleteCapturesFromSource(ids: captureIDs)
-                }
-            }
-        } message: {
-            Text(deleteCaptureConfirmationMessage)
-        }
-        .alert("Could not eject source", isPresented: sourceEjectionErrorPresented) {
-            Button("OK") {
-                store.dismissSourceEjectionError()
-            }
-        } message: {
-            Text(store.sourceEjectionErrorMessage ?? "The source could not be ejected.")
-        }
+        .contentWorkflowAlerts(
+            store: store,
+            showingOverwriteConfirmation: $showingOverwriteConfirmation,
+            importAllRequested: $importAllRequested,
+            showingDeleteConfirmation: $showingDeleteConfirmation,
+            showingClearSidecarConfirmation: $showingClearSidecarConfirmation,
+            showingCaptureSourceDeletionConfirmation: $showingCaptureSourceDeletionConfirmation,
+            captureIDsPendingSourceDeletion: $captureIDsPendingSourceDeletion
+        )
     }
 
-    private func refreshSources() {
-        store.refreshSources()
-
-        if let selectedSource = store.selectedSource {
-            store.loadSource(selectedSource)
-        } else if let firstSource = store.sources.first {
-            store.loadSource(firstSource)
-        }
+    private func refreshSources(preferNewDetectedMedia: Bool = false) {
+        store.refreshSourcesAndLoadPreferredSource(
+            preferNewDetectedMedia: preferNewDetectedMedia
+        )
     }
 
     private func beginImport(importAll: Bool) {
@@ -229,6 +168,142 @@ struct ContentView: View {
         }
 
         store.destinationURL = folderURL
+    }
+
+    private func pickFolder(title: String, prompt: String) -> URL? {
+        let panel = NSOpenPanel()
+        panel.title = title
+        panel.prompt = prompt
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    private var isRunningTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
+}
+
+#Preview {
+    ContentView(store: AppStore())
+}
+
+private struct MountedMediaNotificationsModifier: ViewModifier {
+    let isEnabled: Bool
+    let onMount: @MainActor () -> Void
+    let onUnmount: @MainActor () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .task {
+                guard isEnabled else {
+                    return
+                }
+
+                for await _ in NSWorkspace.shared.notificationCenter.notifications(named: NSWorkspace.didMountNotification) {
+                    await MainActor.run {
+                        onMount()
+                    }
+                }
+            }
+            .task {
+                guard isEnabled else {
+                    return
+                }
+
+                for await _ in NSWorkspace.shared.notificationCenter.notifications(named: NSWorkspace.didUnmountNotification) {
+                    await MainActor.run {
+                        onUnmount()
+                    }
+                }
+            }
+    }
+}
+
+private struct ContentWorkflowAlertsModifier: ViewModifier {
+    let store: AppStore
+    @Binding var showingOverwriteConfirmation: Bool
+    @Binding var importAllRequested: Bool
+    @Binding var showingDeleteConfirmation: Bool
+    @Binding var showingClearSidecarConfirmation: Bool
+    @Binding var showingCaptureSourceDeletionConfirmation: Bool
+    @Binding var captureIDsPendingSourceDeletion: Set<String>
+
+    func body(content: Content) -> some View {
+        content
+            .alert("Overwrite existing imports?", isPresented: $showingOverwriteConfirmation) {
+                Button("Cancel", role: .cancel) {
+                    importAllRequested = false
+                }
+                Button("Overwrite") {
+                    if importAllRequested {
+                        store.selectAllCaptures()
+                    }
+
+                    store.refreshDestinationAvailability()
+                    guard store.canImportSelection else {
+                        importAllRequested = false
+                        return
+                    }
+
+                    Task {
+                        await store.importSelectedCaptures(overwriteDuplicates: true)
+                    }
+                    importAllRequested = false
+                }
+                .disabled(!store.canImportSelection)
+            } message: {
+                Text("Some selected captures are already present in the destination. Overwriting will replace the existing files.")
+            }
+            .alert("Delete imported files from source?", isPresented: $showingDeleteConfirmation) {
+                Button("Keep Files", role: .cancel) {
+                    store.dismissPendingDeletion()
+                }
+                Button("Delete") {
+                    Task {
+                        await store.deleteImportedCapturesFromSource()
+                    }
+                }
+            } message: {
+                Text("Only captures that imported successfully will be removed from the source.")
+            }
+            .alert("Clear sidecar files?", isPresented: $showingClearSidecarConfirmation) {
+                Button("Cancel", role: .cancel) {}
+                Button("Clear sidecar files", role: .destructive) {
+                    Task {
+                        await store.clearSidecarFilesFromSelectedSource()
+                    }
+                }
+            } message: {
+                Text(clearSidecarConfirmationMessage)
+            }
+            .alert(deleteCaptureConfirmationTitle, isPresented: $showingCaptureSourceDeletionConfirmation) {
+                Button("Cancel", role: .cancel) {
+                    captureIDsPendingSourceDeletion = []
+                }
+                Button(deleteCaptureConfirmationButtonTitle, role: .destructive) {
+                    let captureIDs = captureIDsPendingSourceDeletion
+                    guard !captureIDs.isEmpty else {
+                        return
+                    }
+
+                    captureIDsPendingSourceDeletion = []
+                    Task {
+                        await store.deleteCapturesFromSource(ids: captureIDs)
+                    }
+                }
+            } message: {
+                Text(deleteCaptureConfirmationMessage)
+            }
+            .alert("Could not eject source", isPresented: sourceEjectionErrorPresented) {
+                Button("OK") {
+                    store.dismissSourceEjectionError()
+                }
+            } message: {
+                Text(store.sourceEjectionErrorMessage ?? "The source could not be ejected.")
+            }
     }
 
     private var clearSidecarConfirmationMessage: String {
@@ -274,23 +349,42 @@ struct ContentView: View {
             }
         )
     }
-
-    private func pickFolder(title: String, prompt: String) -> URL? {
-        let panel = NSOpenPanel()
-        panel.title = title
-        panel.prompt = prompt
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = true
-        return panel.runModal() == .OK ? panel.url : nil
-    }
-
-    private var isRunningTests: Bool {
-        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-    }
 }
 
-#Preview {
-    ContentView(store: AppStore())
+private extension View {
+    func contentWorkflowAlerts(
+        store: AppStore,
+        showingOverwriteConfirmation: Binding<Bool>,
+        importAllRequested: Binding<Bool>,
+        showingDeleteConfirmation: Binding<Bool>,
+        showingClearSidecarConfirmation: Binding<Bool>,
+        showingCaptureSourceDeletionConfirmation: Binding<Bool>,
+        captureIDsPendingSourceDeletion: Binding<Set<String>>
+    ) -> some View {
+        modifier(
+            ContentWorkflowAlertsModifier(
+                store: store,
+                showingOverwriteConfirmation: showingOverwriteConfirmation,
+                importAllRequested: importAllRequested,
+                showingDeleteConfirmation: showingDeleteConfirmation,
+                showingClearSidecarConfirmation: showingClearSidecarConfirmation,
+                showingCaptureSourceDeletionConfirmation: showingCaptureSourceDeletionConfirmation,
+                captureIDsPendingSourceDeletion: captureIDsPendingSourceDeletion
+            )
+        )
+    }
+
+    func mountedMediaNotifications(
+        isEnabled: Bool,
+        onMount: @escaping @MainActor () -> Void,
+        onUnmount: @escaping @MainActor () -> Void
+    ) -> some View {
+        modifier(
+            MountedMediaNotificationsModifier(
+                isEnabled: isEnabled,
+                onMount: onMount,
+                onUnmount: onUnmount
+            )
+        )
+    }
 }

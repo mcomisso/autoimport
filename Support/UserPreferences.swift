@@ -5,6 +5,7 @@ struct UserPreferences {
         static let destinationPath = "lastDestinationPath"
         static let organizationMode = "destinationOrganizationMode"
         static let showHelperFiles = "showHelperFiles"
+        static let automaticallyImportDetectedMedia = "automaticallyImportDetectedMedia"
     }
 
     private let userDefaults: UserDefaults
@@ -50,5 +51,13 @@ struct UserPreferences {
 
     func saveShowHelperFiles(_ showHelperFiles: Bool) {
         userDefaults.set(showHelperFiles, forKey: Key.showHelperFiles)
+    }
+
+    func automaticallyImportDetectedMedia() -> Bool {
+        userDefaults.bool(forKey: Key.automaticallyImportDetectedMedia)
+    }
+
+    func saveAutomaticallyImportDetectedMedia(_ automaticallyImportDetectedMedia: Bool) {
+        userDefaults.set(automaticallyImportDetectedMedia, forKey: Key.automaticallyImportDetectedMedia)
     }
 }

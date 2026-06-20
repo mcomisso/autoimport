@@ -155,6 +155,158 @@ struct AppStoreTests {
     }
 
     @Test
+    func persistsAutomaticImportPreferenceAcrossStoreInstances() {
+        let suiteName = "AppStoreTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let preferences = UserPreferences(userDefaults: defaults)
+
+        let store = AppStore(
+            preferences: preferences,
+            discoverVolumeSources: { [] },
+            discoverImageCaptureSources: { [] },
+            scanSource: { _ in [] },
+            groupAssets: { _ in CaptureGroupingResult(captures: [], unknownFolders: []) },
+            duplicateStateResolver: { _, _, _, _ in [:] },
+            importCapturesAction: { _, _, _, _, _, _ in ImportSessionResult(captureResults: []) },
+            deleteCaptureFilesAction: { _ in }
+        )
+
+        #expect(store.automaticallyImportDetectedMedia == false)
+
+        store.automaticallyImportDetectedMedia = true
+
+        let reloadedStore = AppStore(
+            preferences: preferences,
+            discoverVolumeSources: { [] },
+            discoverImageCaptureSources: { [] },
+            scanSource: { _ in [] },
+            groupAssets: { _ in CaptureGroupingResult(captures: [], unknownFolders: []) },
+            duplicateStateResolver: { _, _, _, _ in [:] },
+            importCapturesAction: { _, _, _, _, _, _ in ImportSessionResult(captureResults: []) },
+            deleteCaptureFilesAction: { _ in }
+        )
+
+        #expect(reloadedStore.automaticallyImportDetectedMedia == true)
+    }
+
+    @Test
+    func automaticImportOnlyImportsUniqueCapturesFromDetectedMountedMedia() async throws {
+        let source = SourceDevice(
+            id: "volume",
+            displayName: "DJI Camera",
+            kind: .mountedVolume,
+            rootURL: URL(fileURLWithPath: "/Volumes/DJI"),
+            subtitle: "Mounted",
+            state: .ready
+        )
+        let uniqueCapture = makeCapture(id: "unique")
+        let partialCapture = makeCapture(id: "partial")
+        let duplicateCapture = makeCapture(id: "duplicate")
+        let importedCaptureIDs = LockedTestValue<[String]>([])
+        let overwriteValues = LockedTestValue<[Bool]>([])
+        let importAttemptCount = LockedTestValue(0)
+        let store = AppStore(
+            discoverVolumeSources: { [source] },
+            discoverImageCaptureSources: { [] },
+            scanSource: { _ in [] },
+            groupAssets: { _ in
+                CaptureGroupingResult(
+                    captures: [uniqueCapture, partialCapture, duplicateCapture],
+                    unknownFolders: []
+                )
+            },
+            duplicateStateResolver: { captures, _, _, _ in
+                Dictionary(uniqueKeysWithValues: captures.map { capture in
+                    let state: CaptureDuplicateState = switch capture.id {
+                    case "partial":
+                        .partial
+                    case "duplicate":
+                        .duplicate
+                    default:
+                        .unique
+                    }
+                    return (capture.id, state)
+                })
+            },
+            importCapturesAction: { captures, _, _, _, overwriteDuplicates, _ in
+                importAttemptCount.update { $0 += 1 }
+                importedCaptureIDs.set(captures.map(\.id))
+                overwriteValues.update { $0.append(overwriteDuplicates) }
+                return ImportSessionResult(
+                    captureResults: captures.map { capture in
+                        CaptureImportResult(
+                            captureID: capture.id,
+                            status: .imported,
+                            importedURLs: [],
+                            isDeleteEligible: true
+                        )
+                    }
+                )
+            },
+            deleteCaptureFilesAction: { _ in }
+        )
+
+        let destinationURL = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destinationURL) }
+
+        store.destinationURL = destinationURL
+        store.automaticallyImportDetectedMedia = true
+        store.refreshSourcesAndLoadPreferredSource(preferNewDetectedMedia: true)
+        await store.awaitDuplicateDetection()
+        await store.awaitAutomaticImport()
+        await store.awaitDuplicateDetection()
+        await store.awaitAutomaticImport()
+
+        #expect(importAttemptCount.get() == 1)
+        #expect(importedCaptureIDs.get() == ["unique"])
+        #expect(overwriteValues.get() == [false])
+        #expect(store.pendingDeletionCaptureIDs == ["unique"])
+    }
+
+    @Test
+    func automaticImportIgnoresManualFolderSources() async throws {
+        let sourceURL = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        let folderSource = SourceDevice(
+            id: "folder",
+            displayName: "Source Folder",
+            kind: .folderBookmark,
+            rootURL: sourceURL,
+            subtitle: "Source",
+            state: .ready
+        )
+        let capture = makeCapture(id: "unique")
+        let importAttemptCount = LockedTestValue(0)
+        let store = AppStore(
+            discoverVolumeSources: { [] },
+            discoverImageCaptureSources: { [] },
+            scanSource: { _ in [] },
+            groupAssets: { _ in CaptureGroupingResult(captures: [capture], unknownFolders: []) },
+            duplicateStateResolver: { _, _, _, _ in [:] },
+            importCapturesAction: { _, _, _, _, _, _ in
+                importAttemptCount.update { $0 += 1 }
+                return ImportSessionResult(captureResults: [])
+            },
+            deleteCaptureFilesAction: { _ in }
+        )
+
+        let destinationURL = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destinationURL) }
+
+        store.destinationURL = destinationURL
+        store.automaticallyImportDetectedMedia = true
+        store.addFolderSource(folderSource.rootURL!)
+        await store.awaitDuplicateDetection()
+        await store.awaitAutomaticImport()
+
+        #expect(importAttemptCount.get() == 0)
+    }
+
+    @Test
     func selectAllAndClearCaptureSelectionUseCurrentCaptureIDs() {
         let firstCapture = makeCapture(id: "clip-a")
         let secondCapture = makeCapture(id: "clip-b")
