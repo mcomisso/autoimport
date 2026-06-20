@@ -358,7 +358,7 @@ private struct PreviewVideoPlayerView: View {
     var body: some View {
         Group {
             if let player {
-                VideoPlayer(player: player)
+                AVPlayerViewRepresentable(player: player)
             } else {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -386,5 +386,28 @@ private struct PreviewVideoPlayerView: View {
             player?.pause()
             player = nil
         }
+    }
+}
+
+private struct AVPlayerViewRepresentable: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let playerView = AVPlayerView()
+        playerView.controlsStyle = .floating
+        playerView.videoGravity = .resizeAspect
+        playerView.player = player
+        return playerView
+    }
+
+    func updateNSView(_ playerView: AVPlayerView, context: Context) {
+        if playerView.player !== player {
+            playerView.player = player
+        }
+    }
+
+    static func dismantleNSView(_ playerView: AVPlayerView, coordinator: ()) {
+        playerView.player?.pause()
+        playerView.player = nil
     }
 }

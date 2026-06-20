@@ -6,6 +6,10 @@ AutoImport is a native macOS utility for importing photo and video captures from
 
 The app works with logical captures instead of individual files. A single capture can include the primary media file, sidecars, proxies, and multipart video segments, so imports are less likely to miss vendor-specific companion files.
 
+## Snapshot
+
+<img src="docs/images/autoimport-ui.png" alt="AutoImport main window showing source selection, capture list, and inspector">
+
 ## Download
 
 The current release is Developer ID signed, notarized, and published as a DMG:
