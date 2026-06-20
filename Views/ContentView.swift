@@ -1,0 +1,258 @@
+import AppKit
+import SwiftUI
+
+struct ContentView: View {
+    @Bindable var store: AppStore
+
+    @State private var didPerformInitialRefresh = false
+    @State private var tableSelection: Set<String> = []
+    @State private var inspectedUnknownFolderID: String?
+    @State private var isInspectorPresented = true
+    @State private var showingOverwriteConfirmation = false
+    @State private var importAllRequested = false
+    @State private var showingDeleteConfirmation = false
+    @State private var showingClearSidecarConfirmation = false
+    @State private var showingCaptureSourceDeletionConfirmation = false
+    @State private var capturePendingSourceDeletion: LogicalCapture?
+
+    private var inspectedCapture: LogicalCapture? {
+        guard !tableSelection.isEmpty else {
+            return nil
+        }
+
+        return tableSelection.lazy.compactMap(store.capture(withID:)).first
+    }
+
+    private var inspectedUnknownFolder: UnknownFolder? {
+        guard let inspectedUnknownFolderID else {
+            return nil
+        }
+
+        return store.unknownFolders.first { $0.id == inspectedUnknownFolderID }
+    }
+
+    var body: some View {
+        NavigationSplitView {
+            SidebarView(
+                store: store,
+                onRefresh: refreshSources,
+                onAddFolder: chooseSourceFolder
+            )
+        } detail: {
+            VStack(spacing: 0) {
+                CaptureListView(
+                    store: store,
+                    tableSelection: $tableSelection,
+                    inspectedUnknownFolderID: $inspectedUnknownFolderID,
+                    fileActions: .live,
+                    onDeleteCaptureFromSource: { capture in
+                        capturePendingSourceDeletion = capture
+                        showingCaptureSourceDeletionConfirmation = true
+                    },
+                    onClearSidecars: {
+                        showingClearSidecarConfirmation = true
+                    }
+                )
+
+                Divider()
+
+                DestinationToolbarView(
+                    store: store,
+                    onChooseDestination: chooseDestinationFolder,
+                    onImportSelected: { beginImport(importAll: false) },
+                    onImportAll: { beginImport(importAll: true) }
+                )
+            }
+            .navigationTitle(store.selectedSource?.displayName ?? "AutoImport")
+        }
+        .navigationSplitViewStyle(.balanced)
+        .inspector(isPresented: $isInspectorPresented) {
+            InspectorView(
+                capture: inspectedCapture,
+                duplicateState: inspectedCapture.map(store.duplicateState(for:)),
+                unknownFolder: inspectedUnknownFolder,
+                showHelperFiles: Binding(
+                    get: { store.showHelperFiles },
+                    set: { store.showHelperFiles = $0 }
+                )
+            )
+            .inspectorColumnWidth(min: 368, ideal: 420, max: 560)
+        }
+        .toolbar {
+            Button {
+                isInspectorPresented.toggle()
+            } label: {
+                Label("Inspector", systemImage: "sidebar.trailing")
+            }
+            .help(isInspectorPresented ? "Hide Inspector" : "Show Inspector")
+        }
+        .task {
+            guard !didPerformInitialRefresh else {
+                return
+            }
+
+            didPerformInitialRefresh = true
+            guard !isRunningTests else {
+                return
+            }
+            refreshSources()
+        }
+        .onChange(of: store.captureIDs) { _, captureIDs in
+            let validIDs = Set(captureIDs)
+            tableSelection = tableSelection.intersection(validIDs)
+
+            if tableSelection.isEmpty, let firstID = captureIDs.first {
+                tableSelection = [firstID]
+                inspectedUnknownFolderID = nil
+            }
+        }
+        .onChange(of: store.pendingDeletionCaptureIDs) { _, pendingDeletionCaptureIDs in
+            showingDeleteConfirmation = !pendingDeletionCaptureIDs.isEmpty
+        }
+        .alert("Overwrite existing imports?", isPresented: $showingOverwriteConfirmation) {
+            Button("Cancel", role: .cancel) {
+                importAllRequested = false
+            }
+            Button("Overwrite") {
+                if importAllRequested {
+                    store.selectAllCaptures()
+                }
+
+                store.refreshDestinationAvailability()
+                guard store.canImportSelection else {
+                    importAllRequested = false
+                    return
+                }
+
+                Task {
+                    await store.importSelectedCaptures(overwriteDuplicates: true)
+                }
+                importAllRequested = false
+            }
+            .disabled(!store.canImportSelection)
+        } message: {
+            Text("Some selected captures are already present in the destination. Overwriting will replace the existing files.")
+        }
+        .alert("Delete imported files from source?", isPresented: $showingDeleteConfirmation) {
+            Button("Keep Files", role: .cancel) {
+                store.dismissPendingDeletion()
+            }
+            Button("Delete") {
+                Task {
+                    await store.deleteImportedCapturesFromSource()
+                }
+            }
+        } message: {
+            Text("Only captures that imported successfully will be removed from the source.")
+        }
+        .alert("Clear sidecar files?", isPresented: $showingClearSidecarConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear sidecar files", role: .destructive) {
+                Task {
+                    await store.clearSidecarFilesFromSelectedSource()
+                }
+            }
+        } message: {
+            Text(clearSidecarConfirmationMessage)
+        }
+        .alert("Delete capture from source?", isPresented: $showingCaptureSourceDeletionConfirmation) {
+            Button("Cancel", role: .cancel) {
+                capturePendingSourceDeletion = nil
+            }
+            Button("Delete Capture", role: .destructive) {
+                guard let captureID = capturePendingSourceDeletion?.id else {
+                    return
+                }
+
+                capturePendingSourceDeletion = nil
+                Task {
+                    await store.deleteCapturesFromSource(ids: [captureID])
+                }
+            }
+        } message: {
+            Text(deleteCaptureConfirmationMessage)
+        }
+    }
+
+    private func refreshSources() {
+        store.refreshSources()
+
+        if let selectedSource = store.selectedSource {
+            store.loadSource(selectedSource)
+        } else if let firstSource = store.sources.first {
+            store.loadSource(firstSource)
+        }
+    }
+
+    private func beginImport(importAll: Bool) {
+        if importAll {
+            store.selectAllCaptures()
+        }
+
+        store.refreshDestinationAvailability()
+        guard store.canImportSelection else {
+            return
+        }
+
+        importAllRequested = importAll
+
+        if !store.duplicateCapturesInSelection.isEmpty {
+            showingOverwriteConfirmation = true
+        } else {
+            Task {
+                await store.importSelectedCaptures(overwriteDuplicates: false)
+            }
+        }
+    }
+
+    private func chooseSourceFolder() {
+        guard let folderURL = pickFolder(title: "Choose Source Folder", prompt: "Add Source") else {
+            return
+        }
+
+        store.addFolderSource(folderURL)
+        tableSelection = []
+        inspectedUnknownFolderID = nil
+    }
+
+    private func chooseDestinationFolder() {
+        guard let folderURL = pickFolder(title: "Choose Import Destination", prompt: "Choose Destination") else {
+            return
+        }
+
+        store.destinationURL = folderURL
+    }
+
+    private var clearSidecarConfirmationMessage: String {
+        let count = store.sidecarFilesInSelectedSource.count
+        let fileLabel = count == 1 ? "file" : "files"
+        let sourceName = store.selectedSource?.displayName ?? "the selected source"
+        return "This will delete \(count) sidecar \(fileLabel) from \(sourceName). Photos, videos, and unknown file types will be kept."
+    }
+
+    private var deleteCaptureConfirmationMessage: String {
+        let captureName = capturePendingSourceDeletion?.displayName ?? "this capture"
+        let fileCount = capturePendingSourceDeletion?.memberFiles.count ?? 0
+        let fileLabel = fileCount == 1 ? "file" : "files"
+        return "This will delete \(captureName) and its \(fileCount) source \(fileLabel). Files are moved to Trash when possible; on removable media that does not support Trash, deletion may be permanent."
+    }
+
+    private func pickFolder(title: String, prompt: String) -> URL? {
+        let panel = NSOpenPanel()
+        panel.title = title
+        panel.prompt = prompt
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    private var isRunningTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
+}
+
+#Preview {
+    ContentView(store: AppStore())
+}

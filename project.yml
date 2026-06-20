@@ -1,0 +1,45 @@
+name: AutoImport
+options:
+  bundleIdPrefix: com.matcom
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    PRODUCT_BUNDLE_IDENTIFIER: com.matcom.AutoImport
+    CURRENT_PROJECT_VERSION: 1
+    MARKETING_VERSION: 0.1.0
+targets:
+  AutoImport:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+      - path: Views
+      - path: Models
+      - path: Stores
+      - path: Services
+      - path: Support
+    settings:
+      base:
+        PRODUCT_NAME: AutoImport
+        GENERATE_INFOPLIST_FILE: true
+        INFOPLIST_KEY_CFBundleDisplayName: AutoImport
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.photography
+        INFOPLIST_KEY_NSPrincipalClass: NSApplication
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+    scheme:
+      testTargets:
+        - AutoImportTests
+  AutoImportTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: AutoImportTests
+    dependencies:
+      - target: AutoImport
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
