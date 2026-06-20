@@ -5,7 +5,7 @@ struct CaptureListView: View {
     @Binding var tableSelection: Set<String>
     @Binding var inspectedUnknownFolderID: String?
     let fileActions: CaptureFileActions
-    let onDeleteCaptureFromSource: (LogicalCapture) -> Void
+    let onDeleteCapturesFromSource: (Set<String>) -> Void
     let onClearSidecars: () -> Void
 
     @State private var sortOrder: [KeyPathComparator<CaptureRowPresentation>] = []
@@ -28,7 +28,7 @@ struct CaptureListView: View {
                     tableSelection: $tableSelection,
                     inspectedUnknownFolderID: $inspectedUnknownFolderID,
                     fileActions: fileActions,
-                    onDeleteCaptureFromSource: onDeleteCaptureFromSource,
+                    onDeleteCapturesFromSource: onDeleteCapturesFromSource,
                     sortOrder: $sortOrder
                 )
             }
@@ -172,7 +172,7 @@ private struct CaptureTableView: View {
     @Binding var tableSelection: Set<String>
     @Binding var inspectedUnknownFolderID: String?
     let fileActions: CaptureFileActions
-    let onDeleteCaptureFromSource: (LogicalCapture) -> Void
+    let onDeleteCapturesFromSource: (Set<String>) -> Void
     @Binding var sortOrder: [KeyPathComparator<CaptureRowPresentation>]
 
     var body: some View {
@@ -219,10 +219,12 @@ private struct CaptureTableView: View {
             ForEach(rows) { item in
                 TableRow(item)
                     .contextMenu {
+                        let deletionIDs = deletionIDs(for: item)
+
                         CaptureContextMenu(
                             row: item,
                             isMarkedForImport: store.isCaptureSelected(id: item.id),
-                            canDeleteFromSource: store.canDeleteCaptureFromSource(id: item.id),
+                            deleteSelectionCount: deletionIDs.count,
                             onOpen: {
                                 fileActions.open(item.capture)
                             },
@@ -243,9 +245,13 @@ private struct CaptureTableView: View {
                                 inspectedUnknownFolderID = nil
                             },
                             onDeleteFromSource: {
-                                tableSelection = [item.id]
+                                guard !deletionIDs.isEmpty else {
+                                    return
+                                }
+
+                                tableSelection = deletionIDs
                                 inspectedUnknownFolderID = nil
-                                onDeleteCaptureFromSource(item.capture)
+                                onDeleteCapturesFromSource(deletionIDs)
                             }
                         )
                     }
@@ -268,12 +274,17 @@ private struct CaptureTableView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+    private func deletionIDs(for item: CaptureRowPresentation) -> Set<String> {
+        let candidateIDs: Set<String> = tableSelection.contains(item.id) ? tableSelection : [item.id]
+        return Set(candidateIDs.filter(store.canDeleteCaptureFromSource(id:)))
+    }
 }
 
 private struct CaptureContextMenu: View {
     let row: CaptureRowPresentation
     let isMarkedForImport: Bool
-    let canDeleteFromSource: Bool
+    let deleteSelectionCount: Int
     let onOpen: () -> Void
     let onRevealInFinder: () -> Void
     let onCopyFilePath: () -> Void
@@ -313,8 +324,16 @@ private struct CaptureContextMenu: View {
         Divider()
 
         Button(role: .destructive, action: onDeleteFromSource) {
-            Label("Delete from Source...", systemImage: "trash")
+            Label(deleteActionTitle, systemImage: "trash")
         }
-        .disabled(!canDeleteFromSource)
+        .disabled(deleteSelectionCount == 0)
+    }
+
+    private var deleteActionTitle: String {
+        guard deleteSelectionCount > 1 else {
+            return "Delete from Source..."
+        }
+
+        return "Delete \(deleteSelectionCount) Captures from Source..."
     }
 }

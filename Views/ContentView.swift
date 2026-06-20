@@ -13,7 +13,7 @@ struct ContentView: View {
     @State private var showingDeleteConfirmation = false
     @State private var showingClearSidecarConfirmation = false
     @State private var showingCaptureSourceDeletionConfirmation = false
-    @State private var capturePendingSourceDeletion: LogicalCapture?
+    @State private var captureIDsPendingSourceDeletion: Set<String> = []
 
     private var inspectedCapture: LogicalCapture? {
         guard !tableSelection.isEmpty else {
@@ -45,8 +45,8 @@ struct ContentView: View {
                     tableSelection: $tableSelection,
                     inspectedUnknownFolderID: $inspectedUnknownFolderID,
                     fileActions: .live,
-                    onDeleteCaptureFromSource: { capture in
-                        capturePendingSourceDeletion = capture
+                    onDeleteCapturesFromSource: { captureIDs in
+                        captureIDsPendingSourceDeletion = captureIDs
                         showingCaptureSourceDeletionConfirmation = true
                     },
                     onClearSidecars: {
@@ -155,22 +155,30 @@ struct ContentView: View {
         } message: {
             Text(clearSidecarConfirmationMessage)
         }
-        .alert("Delete capture from source?", isPresented: $showingCaptureSourceDeletionConfirmation) {
+        .alert(deleteCaptureConfirmationTitle, isPresented: $showingCaptureSourceDeletionConfirmation) {
             Button("Cancel", role: .cancel) {
-                capturePendingSourceDeletion = nil
+                captureIDsPendingSourceDeletion = []
             }
-            Button("Delete Capture", role: .destructive) {
-                guard let captureID = capturePendingSourceDeletion?.id else {
+            Button(deleteCaptureConfirmationButtonTitle, role: .destructive) {
+                let captureIDs = captureIDsPendingSourceDeletion
+                guard !captureIDs.isEmpty else {
                     return
                 }
 
-                capturePendingSourceDeletion = nil
+                captureIDsPendingSourceDeletion = []
                 Task {
-                    await store.deleteCapturesFromSource(ids: [captureID])
+                    await store.deleteCapturesFromSource(ids: captureIDs)
                 }
             }
         } message: {
             Text(deleteCaptureConfirmationMessage)
+        }
+        .alert("Could not eject source", isPresented: sourceEjectionErrorPresented) {
+            Button("OK") {
+                store.dismissSourceEjectionError()
+            }
+        } message: {
+            Text(store.sourceEjectionErrorMessage ?? "The source could not be ejected.")
         }
     }
 
@@ -231,10 +239,40 @@ struct ContentView: View {
     }
 
     private var deleteCaptureConfirmationMessage: String {
-        let captureName = capturePendingSourceDeletion?.displayName ?? "this capture"
-        let fileCount = capturePendingSourceDeletion?.memberFiles.count ?? 0
+        let captures = capturesPendingSourceDeletion
+        let fileCount = captures.reduce(0) { $0 + $1.memberFiles.count }
         let fileLabel = fileCount == 1 ? "file" : "files"
-        return "This will delete \(captureName) and its \(fileCount) source \(fileLabel). Files are moved to Trash when possible; on removable media that does not support Trash, deletion may be permanent."
+        let sourceDeletionWarning = "Files are moved to Trash when possible; on removable media that does not support Trash, deletion may be permanent."
+
+        if captures.count == 1 {
+            let captureName = captures.first?.displayName ?? "this capture"
+            return "This will delete \(captureName) and its \(fileCount) source \(fileLabel). \(sourceDeletionWarning)"
+        }
+
+        return "This will delete \(captures.count) captures and their \(fileCount) source \(fileLabel). \(sourceDeletionWarning)"
+    }
+
+    private var deleteCaptureConfirmationTitle: String {
+        capturesPendingSourceDeletion.count == 1 ? "Delete capture from source?" : "Delete captures from source?"
+    }
+
+    private var deleteCaptureConfirmationButtonTitle: String {
+        capturesPendingSourceDeletion.count == 1 ? "Delete Capture" : "Delete Captures"
+    }
+
+    private var capturesPendingSourceDeletion: [LogicalCapture] {
+        store.captures.filter { captureIDsPendingSourceDeletion.contains($0.id) }
+    }
+
+    private var sourceEjectionErrorPresented: Binding<Bool> {
+        Binding(
+            get: { store.sourceEjectionErrorMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    store.dismissSourceEjectionError()
+                }
+            }
+        )
     }
 
     private func pickFolder(title: String, prompt: String) -> URL? {

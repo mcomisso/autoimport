@@ -35,6 +35,18 @@ struct SidebarView: View {
                 } else {
                     ForEach(store.sources) { source in
                         sourceRow(source)
+                            .contextMenu {
+                                SourceContextMenu(
+                                    source: source,
+                                    canEject: store.canEjectSource(source),
+                                    isEjecting: store.ejectingSourceID == source.id,
+                                    onEject: {
+                                        Task {
+                                            await store.ejectSource(source)
+                                        }
+                                    }
+                                )
+                            }
                             .tag(source.id)
                     }
                 }
@@ -98,6 +110,22 @@ struct SidebarView: View {
             return .orange
         case .folderBookmark:
             return .teal
+        }
+    }
+}
+
+private struct SourceContextMenu: View {
+    let source: SourceDevice
+    let canEject: Bool
+    let isEjecting: Bool
+    let onEject: () -> Void
+
+    var body: some View {
+        if source.kind == .mountedVolume {
+            Button(action: onEject) {
+                Label(isEjecting ? "Ejecting..." : "Eject", systemImage: "eject")
+            }
+            .disabled(!canEject)
         }
     }
 }

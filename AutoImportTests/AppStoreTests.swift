@@ -512,6 +512,123 @@ struct AppStoreTests {
         #expect(store.pendingDeletionCaptureIDs.isEmpty)
     }
 
+    @Test
+    func ejectSourceEjectsMountedVolumeRefreshesSourcesAndLoadsNextSelection() async {
+        let mountedSource = SourceDevice(
+            id: "volume",
+            displayName: "DJI Camera",
+            kind: .mountedVolume,
+            rootURL: URL(fileURLWithPath: "/Volumes/DJI"),
+            subtitle: "Mounted",
+            state: .ready
+        )
+        let imageCaptureSource = SourceDevice(
+            id: "image-capture",
+            displayName: "DJI Camera",
+            kind: .imageCaptureDevice,
+            rootURL: nil,
+            subtitle: "Connected",
+            state: .ready
+        )
+
+        let discoveredVolumeSources = LockedTestValue<[SourceDevice]>([mountedSource])
+        let ejectedSourceIDs = LockedTestValue<[String]>([])
+        let scannedSourceIDs = LockedTestValue<[String]>([])
+        let store = AppStore(
+            discoverVolumeSources: { discoveredVolumeSources.get() },
+            discoverImageCaptureSources: { [imageCaptureSource] },
+            scanSource: { source in
+                scannedSourceIDs.update { $0.append(source.id) }
+                return []
+            },
+            groupAssets: { _ in CaptureGroupingResult(captures: [], unknownFolders: []) },
+            duplicateStateResolver: { _, _, _, _ in [:] },
+            importCapturesAction: { _, _, _, _, _, _ in ImportSessionResult(captureResults: []) },
+            deleteCaptureFilesAction: { _ in },
+            ejectSourceAction: { source in
+                ejectedSourceIDs.update { $0.append(source.id) }
+                discoveredVolumeSources.set([])
+            }
+        )
+
+        store.refreshSources()
+        store.loadSource(mountedSource)
+        await store.awaitSourceLoading()
+
+        #expect(store.canEjectSource(mountedSource))
+
+        await store.ejectSource(mountedSource)
+        await store.awaitSourceLoading()
+
+        #expect(ejectedSourceIDs.get() == ["volume"])
+        #expect(store.ejectingSourceID == nil)
+        #expect(store.sourceEjectionErrorMessage == nil)
+        #expect(store.sources.map(\.id) == ["image-capture"])
+        #expect(store.selectedSource?.id == "image-capture")
+        #expect(scannedSourceIDs.get() == ["volume", "image-capture"])
+    }
+
+    @Test
+    func ejectSourceSkipsUnsupportedSourcesBusyStateAndReportsFailures() async {
+        let folderSource = SourceDevice(
+            id: "folder",
+            displayName: "Downloads",
+            kind: .folderBookmark,
+            rootURL: URL(fileURLWithPath: "/Users/example/Downloads"),
+            subtitle: "Downloads",
+            state: .ready
+        )
+        let volumeSource = SourceDevice(
+            id: "volume",
+            displayName: "DJI Camera",
+            kind: .mountedVolume,
+            rootURL: URL(fileURLWithPath: "/Volumes/DJI"),
+            subtitle: "Mounted",
+            state: .ready
+        )
+
+        let ejectAttemptCount = LockedTestValue(0)
+        let store = AppStore(
+            discoverVolumeSources: { [volumeSource] },
+            discoverImageCaptureSources: { [] },
+            scanSource: { _ in [] },
+            groupAssets: { _ in CaptureGroupingResult(captures: [], unknownFolders: []) },
+            duplicateStateResolver: { _, _, _, _ in [:] },
+            importCapturesAction: { _, _, _, _, _, _ in ImportSessionResult(captureResults: []) },
+            deleteCaptureFilesAction: { _ in },
+            ejectSourceAction: { _ in
+                ejectAttemptCount.update { $0 += 1 }
+                throw VolumeEjectionError.unsupportedSource
+            }
+        )
+
+        #expect(!store.canEjectSource(folderSource))
+
+        await store.ejectSource(folderSource)
+
+        #expect(ejectAttemptCount.get() == 0)
+
+        store.isImporting = true
+
+        #expect(!store.canEjectSource(volumeSource))
+
+        await store.ejectSource(volumeSource)
+
+        #expect(ejectAttemptCount.get() == 0)
+
+        store.isImporting = false
+
+        await store.ejectSource(volumeSource)
+
+        #expect(ejectAttemptCount.get() == 1)
+        #expect(store.ejectingSourceID == nil)
+        #expect(store.sourceEjectionErrorMessage == "Only mounted source drives can be ejected.")
+
+        store.dismissSourceEjectionError()
+
+        #expect(store.sourceEjectionErrorMessage == nil)
+    }
+
     private func makeCapture(id: String, memberFiles: [SourceAssetFile] = []) -> LogicalCapture {
         LogicalCapture(
             id: id,

@@ -132,6 +132,7 @@ final class AppStore {
     typealias ImportCapturesAction = @Sendable ([LogicalCapture], URL, DestinationOrganizationMode, String, Bool, @escaping ImportProgressHandler) async -> ImportSessionResult
     typealias DeleteCaptureFilesAction = @Sendable ([LogicalCapture]) async -> Void
     typealias DeleteSourceFilesAction = @Sendable ([SourceAssetFile]) async -> Void
+    typealias EjectSourceAction = @Sendable (SourceDevice) async throws -> Void
 
     private let preferences: UserPreferences
     private let discoverVolumeSources: DiscoverSourcesAction
@@ -142,6 +143,7 @@ final class AppStore {
     private let importCapturesAction: ImportCapturesAction
     private let deleteCaptureFilesAction: DeleteCaptureFilesAction
     private let deleteSourceFilesAction: DeleteSourceFilesAction
+    private let ejectSourceAction: EjectSourceAction
 
     private var folderSources: [SourceDevice] = []
     private var duplicateStatesByCaptureID: [String: CaptureDuplicateState] = [:]
@@ -151,6 +153,7 @@ final class AppStore {
     private var duplicateDetectionGeneration = 0
     private var destinationCapacityTask: Task<Void, Never>?
     private var destinationCapacityGeneration = 0
+    private var sourceEjectionTask: Task<Void, Never>?
 
     @ObservationIgnored private var captureByID: [String: LogicalCapture] = [:]
     @ObservationIgnored private var captureSizeByID: [String: Int64] = [:]
@@ -179,6 +182,8 @@ final class AppStore {
     var isLoadingSource = false
     var isImporting = false
     var importProgress: ImportProgress?
+    var ejectingSourceID: String?
+    var sourceEjectionErrorMessage: String?
     private(set) var destinationCapacity: DestinationCapacity?
     private(set) var destinationAvailability: DestinationAvailability = .notSelected
     var showHelperFiles: Bool {
@@ -257,6 +262,9 @@ final class AppStore {
         },
         deleteSourceFilesAction: @escaping DeleteSourceFilesAction = { files in
             SourceDeletionService().delete(files)
+        },
+        ejectSourceAction: @escaping EjectSourceAction = { source in
+            try VolumeEjectionService().eject(source)
         }
     ) {
         self.preferences = preferences
@@ -268,6 +276,7 @@ final class AppStore {
         self.importCapturesAction = importCapturesAction
         self.deleteCaptureFilesAction = deleteCaptureFilesAction
         self.deleteSourceFilesAction = deleteSourceFilesAction
+        self.ejectSourceAction = ejectSourceAction
         self.destinationURL = preferences.destinationURL()
         self.organizationMode = preferences.organizationMode()
         self.showHelperFiles = preferences.showHelperFiles()
@@ -317,6 +326,14 @@ final class AppStore {
 
     var canClearSidecarFiles: Bool {
         selectedSource?.rootURL != nil && !sidecarFilesInSelectedSource.isEmpty && !isLoadingSource && !isImporting
+    }
+
+    func canEjectSource(_ source: SourceDevice) -> Bool {
+        source.kind == .mountedVolume
+            && source.rootURL != nil
+            && ejectingSourceID == nil
+            && !isLoadingSource
+            && !isImporting
     }
 
     var importSummary: String? {
@@ -395,6 +412,10 @@ final class AppStore {
     func awaitDuplicateDetection() async {
         await sourceLoadingTask?.value
         await duplicateDetectionTask?.value
+    }
+
+    func awaitSourceEjection() async {
+        await sourceEjectionTask?.value
     }
 
     func duplicateState(for capture: LogicalCapture) -> CaptureDuplicateState {
@@ -594,6 +615,39 @@ final class AppStore {
         }
     }
 
+    func ejectSource(_ source: SourceDevice) async {
+        guard canEjectSource(source) else {
+            return
+        }
+
+        sourceEjectionErrorMessage = nil
+        ejectingSourceID = source.id
+
+        let action = ejectSourceAction
+        let wasSelectedSource = selectedSource?.id == source.id
+
+        sourceEjectionTask = Task { [weak self] in
+            do {
+                try await action(source)
+                self?.finishSourceEjection(
+                    wasSelectedSource: wasSelectedSource,
+                    errorMessage: nil
+                )
+            } catch {
+                self?.finishSourceEjection(
+                    wasSelectedSource: wasSelectedSource,
+                    errorMessage: error.localizedDescription
+                )
+            }
+        }
+
+        await sourceEjectionTask?.value
+    }
+
+    func dismissSourceEjectionError() {
+        sourceEjectionErrorMessage = nil
+    }
+
     func addFolderSource(_ url: URL) {
         let standardizedURL = url.standardizedFileURL
         let source = SourceDevice(
@@ -624,6 +678,47 @@ final class AppStore {
         }
 
         destinationAvailability = .resolve(url: destinationURL)
+    }
+
+    private func clearLoadedSource() {
+        sourceLoadingTask?.cancel()
+        sourceLoadingGeneration += 1
+        duplicateDetectionTask?.cancel()
+        duplicateDetectionGeneration += 1
+
+        selectedSource = nil
+        isLoadingSource = false
+        captures = []
+        unknownFolders = []
+        pendingDeletionCaptureIDs = []
+        lastImportResult = nil
+        selectedCaptureIDs = []
+        duplicateStatesByCaptureID = [:]
+        refreshCaptureRows()
+    }
+
+    private func finishSourceEjection(
+        wasSelectedSource: Bool,
+        errorMessage: String?
+    ) {
+        ejectingSourceID = nil
+
+        if let errorMessage {
+            sourceEjectionErrorMessage = errorMessage
+            return
+        }
+
+        refreshSources()
+
+        guard wasSelectedSource else {
+            return
+        }
+
+        if let selectedSource {
+            loadSource(selectedSource)
+        } else {
+            clearLoadedSource()
+        }
     }
 
     private func applyLoadedSource(

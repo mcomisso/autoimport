@@ -139,26 +139,11 @@ private struct CaptureMetadataSection: View {
 
     var body: some View {
         GroupBox {
-            VStack(alignment: .leading, spacing: 10) {
-                switch loadState {
-                case .idle, .loading:
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-
-                        Text("Loading metadata...")
-                            .foregroundStyle(.secondary)
-                    }
-                case .unavailable:
-                    Text("No media metadata available for this capture.")
-                        .foregroundStyle(.secondary)
-                case .loaded(let metadata):
-                    CaptureMetadataRowsView(metadata: metadata)
-                }
-            }
+            CaptureMetadataStateView(loadState: loadState)
         } label: {
             Text("Metadata")
         }
+        .animation(.snappy(duration: 0.24), value: loadState)
         .task(id: sourceAsset?.id) {
             await loadMetadata()
         }
@@ -167,11 +152,15 @@ private struct CaptureMetadataSection: View {
     @MainActor
     private func loadMetadata() async {
         guard let sourceAsset else {
-            loadState = .unavailable
+            withAnimation(.snappy(duration: 0.24)) {
+                loadState = .unavailable
+            }
             return
         }
 
-        loadState = .loading
+        withAnimation(.snappy(duration: 0.24)) {
+            loadState = .loading
+        }
 
         let fileURL = sourceAsset.fileURL
         let metadata = await Task.detached(priority: .utility) {
@@ -182,7 +171,9 @@ private struct CaptureMetadataSection: View {
             return
         }
 
-        loadState = .loaded(metadata)
+        withAnimation(.snappy(duration: 0.24)) {
+            loadState = .loaded(metadata)
+        }
     }
 }
 
@@ -191,6 +182,93 @@ private enum MetadataLoadState: Equatable {
     case loading
     case unavailable
     case loaded(CaptureMetadata)
+}
+
+private struct CaptureMetadataStateView: View {
+    let loadState: MetadataLoadState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            switch loadState {
+            case .idle, .loading:
+                MetadataLoadingView()
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            case .unavailable:
+                Text("No media metadata available for this capture.")
+                    .foregroundStyle(.secondary)
+                    .transition(.opacity)
+            case .loaded(let metadata):
+                CaptureMetadataRowsView(metadata: metadata)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+        }
+    }
+}
+
+private struct MetadataLoadingView: View {
+    @State private var isPulsing = false
+
+    private static let placeholders = [
+        MetadataLoadingPlaceholder(id: 0, labelWidth: 48, valueWidth: 156),
+        MetadataLoadingPlaceholder(id: 1, labelWidth: 62, valueWidth: 124),
+        MetadataLoadingPlaceholder(id: 2, labelWidth: 54, valueWidth: 184)
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                    .opacity(isPulsing ? 1 : 0.68)
+
+                Text("Loading metadata...")
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 9) {
+                ForEach(Self.placeholders) { placeholder in
+                    MetadataLoadingPlaceholderRow(placeholder: placeholder, isPulsing: isPulsing)
+                }
+            }
+            .accessibilityHidden(true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear {
+            isPulsing = false
+            withAnimation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true)) {
+                isPulsing = true
+            }
+        }
+        .onDisappear {
+            isPulsing = false
+        }
+    }
+}
+
+private struct MetadataLoadingPlaceholderRow: View {
+    let placeholder: MetadataLoadingPlaceholder
+    let isPulsing: Bool
+
+    var body: some View {
+        HStack(alignment: .center) {
+            Capsule()
+                .fill(.secondary.opacity(isPulsing ? 0.22 : 0.08))
+                .frame(width: placeholder.labelWidth, height: 7)
+
+            Spacer(minLength: 12)
+
+            Capsule()
+                .fill(.secondary.opacity(isPulsing ? 0.26 : 0.1))
+                .frame(width: placeholder.valueWidth, height: 7)
+        }
+        .frame(height: 14)
+    }
+}
+
+private struct MetadataLoadingPlaceholder: Identifiable {
+    let id: Int
+    let labelWidth: CGFloat
+    let valueWidth: CGFloat
 }
 
 private struct CaptureMetadataRowsView: View {
