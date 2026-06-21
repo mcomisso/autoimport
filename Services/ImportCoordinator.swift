@@ -460,23 +460,35 @@ enum DestinationImportPlanner {
         }
 
         let referenceDate = capture.primaryAsset?.modificationDate ?? .now
-        let yearFormatter = DateFormatter()
-        yearFormatter.dateFormat = "yyyy"
-        let dayFormatter = DateFormatter()
-        dayFormatter.dateFormat = "yyyy-MM-dd"
+        let datePathComponents = DestinationImportDatePathComponents(date: referenceDate)
 
         switch organizationMode {
         case .flat:
             return destinationRoot
         case .byDate:
             return destinationRoot
-                .appendingPathComponent(yearFormatter.string(from: referenceDate), isDirectory: true)
-                .appendingPathComponent(dayFormatter.string(from: referenceDate), isDirectory: true)
+                .appendingPathComponent(datePathComponents.year, isDirectory: true)
+                .appendingPathComponent(datePathComponents.day, isDirectory: true)
         case .byCameraAndDate:
             return destinationRoot
                 .appendingPathComponent(cameraName, isDirectory: true)
-                .appendingPathComponent(yearFormatter.string(from: referenceDate), isDirectory: true)
-                .appendingPathComponent(dayFormatter.string(from: referenceDate), isDirectory: true)
+                .appendingPathComponent(datePathComponents.year, isDirectory: true)
+                .appendingPathComponent(datePathComponents.day, isDirectory: true)
         }
+    }
+}
+
+private struct DestinationImportDatePathComponents {
+    let year: String
+    let day: String
+
+    init(date: Date, calendar: Calendar = .current) {
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        let yearValue = components.year ?? 0
+        let monthValue = components.month ?? 1
+        let dayValue = components.day ?? 1
+
+        year = String(format: "%04d", yearValue)
+        day = String(format: "%04d-%02d-%02d", yearValue, monthValue, dayValue)
     }
 }

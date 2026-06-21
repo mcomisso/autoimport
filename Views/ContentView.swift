@@ -67,6 +67,7 @@ struct ContentView: View {
             .navigationTitle(store.selectedSource?.displayName ?? "AutoImport")
         }
         .navigationSplitViewStyle(.balanced)
+        .environment(\.mediaProcessingTracker, store.mediaProcessingTracker)
         .inspector(isPresented: $isInspectorPresented) {
             InspectorView(
                 capture: inspectedCapture,
@@ -80,12 +81,16 @@ struct ContentView: View {
             .inspectorColumnWidth(min: 320, ideal: 380, max: 520)
         }
         .toolbar {
-            Button {
-                isInspectorPresented.toggle()
-            } label: {
-                Label("Inspector", systemImage: "sidebar.trailing")
+            ToolbarItemGroup {
+                BackgroundProcessingToolbarIndicator(tracker: store.mediaProcessingTracker)
+
+                Button {
+                    isInspectorPresented.toggle()
+                } label: {
+                    Label("Inspector", systemImage: "sidebar.trailing")
+                }
+                .help(isInspectorPresented ? "Hide Inspector" : "Show Inspector")
             }
-            .help(isInspectorPresented ? "Hide Inspector" : "Show Inspector")
         }
         .task {
             guard !didPerformInitialRefresh else {
@@ -133,21 +138,21 @@ struct ContentView: View {
     }
 
     private func beginImport(importAll: Bool) {
-        if importAll {
-            store.selectAllCaptures()
-        }
+        Task {
+            if importAll {
+                store.selectAllCaptures()
+            }
 
-        store.refreshDestinationAvailability()
-        guard store.canImportSelection else {
-            return
-        }
+            await store.resolveDestinationAvailability(refreshDependents: false)
+            guard store.canImportSelection else {
+                return
+            }
 
-        importAllRequested = importAll
+            importAllRequested = importAll
 
-        if store.hasDuplicateCapturesInSelection {
-            showingOverwriteConfirmation = true
-        } else {
-            Task {
+            if store.hasDuplicateCapturesInSelection {
+                showingOverwriteConfirmation = true
+            } else {
                 await store.importSelectedCaptures(overwriteDuplicates: false)
             }
         }
@@ -189,6 +194,28 @@ struct ContentView: View {
 
 #Preview {
     ContentView(store: AppStore())
+}
+
+private struct BackgroundProcessingToolbarIndicator: View {
+    let tracker: MediaProcessingTracker
+
+    var body: some View {
+        if tracker.hasActiveWork {
+            HStack(spacing: 7) {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 16, height: 16)
+
+                Text(tracker.toolbarStatusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(maxWidth: 170, alignment: .leading)
+            }
+            .help(tracker.detailText)
+            .accessibilityLabel(tracker.accessibilityText)
+        }
+    }
 }
 
 private struct MountedMediaNotificationsModifier: ViewModifier {
@@ -243,16 +270,16 @@ private struct ContentWorkflowAlertsModifier: ViewModifier {
                         store.selectAllCaptures()
                     }
 
-                    store.refreshDestinationAvailability()
-                    guard store.canImportSelection else {
-                        importAllRequested = false
-                        return
-                    }
-
                     Task {
+                        await store.resolveDestinationAvailability(refreshDependents: false)
+                        guard store.canImportSelection else {
+                            importAllRequested = false
+                            return
+                        }
+
                         await store.importSelectedCaptures(overwriteDuplicates: true)
+                        importAllRequested = false
                     }
-                    importAllRequested = false
                 }
                 .disabled(!store.canImportSelection)
             } message: {

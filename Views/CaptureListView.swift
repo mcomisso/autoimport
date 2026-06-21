@@ -10,6 +10,8 @@ struct CaptureListView: View {
 
     @State private var sortOrder: [KeyPathComparator<CaptureRowPresentation>] = []
     @State private var sortedRows: [CaptureRowPresentation] = []
+    @State private var sortTask: Task<Void, Never>?
+    @State private var sortGeneration = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -98,6 +100,10 @@ struct CaptureListView: View {
         .onChange(of: store.captureRows, initial: true) { _, rows in
             refreshSortedRows(from: rows, sortOrder: sortOrder)
         }
+        .onDisappear {
+            sortTask?.cancel()
+            sortTask = nil
+        }
     }
 
     private var header: some View {
@@ -150,12 +156,33 @@ struct CaptureListView: View {
         from rows: [CaptureRowPresentation],
         sortOrder: [KeyPathComparator<CaptureRowPresentation>]
     ) {
+        sortTask?.cancel()
+        sortGeneration += 1
+        let generation = sortGeneration
+
         guard !sortOrder.isEmpty else {
-            sortedRows = rows
+            if sortedRows != rows {
+                sortedRows = rows
+            }
             return
         }
 
-        sortedRows = rows.sorted(using: sortOrder + [KeyPathComparator(\.captureSortValue)])
+        let rowsSnapshot = rows
+        let sortOrderSnapshot = sortOrder
+        sortTask = Task.detached(priority: .userInitiated) {
+            let sortedRows = rowsSnapshot.sorted(using: sortOrderSnapshot + [KeyPathComparator(\.captureSortValue)])
+            guard !Task.isCancelled else {
+                return
+            }
+
+            await MainActor.run {
+                guard sortGeneration == generation, self.sortedRows != sortedRows else {
+                    return
+                }
+
+                self.sortedRows = sortedRows
+            }
+        }
     }
 
     private var headerSubtitle: String {

@@ -77,7 +77,7 @@ struct AppStoreTests {
     }
 
     @Test
-    func refreshSourcesToleratesDuplicateImageCaptureNames() {
+    func refreshSourcesToleratesDuplicateImageCaptureNames() async {
         let firstImageCaptureSource = SourceDevice(
             id: "image-capture-a",
             displayName: "DJI Camera",
@@ -114,6 +114,7 @@ struct AppStoreTests {
         )
 
         imageCaptureOnlyStore.refreshSources()
+        await imageCaptureOnlyStore.awaitSourceRefresh()
 
         #expect(imageCaptureOnlyStore.sources.map(\.id) == ["image-capture-a"])
 
@@ -128,8 +129,47 @@ struct AppStoreTests {
         )
 
         mountedVolumeStore.refreshSources()
+        await mountedVolumeStore.awaitSourceRefresh()
 
         #expect(mountedVolumeStore.sources.map(\.id) == ["volume"])
+    }
+
+    @Test
+    func refreshSourcesReturnsBeforeVolumeDiscoveryCompletes() async {
+        let mountedSource = SourceDevice(
+            id: "volume",
+            displayName: "DJI Camera",
+            kind: .mountedVolume,
+            rootURL: URL(fileURLWithPath: "/Volumes/DJI"),
+            subtitle: "Mounted",
+            state: .ready
+        )
+        let discoveryStarted = DispatchSemaphore(value: 0)
+        let releaseDiscovery = DispatchSemaphore(value: 0)
+        let store = AppStore(
+            discoverVolumeSources: {
+                discoveryStarted.signal()
+                _ = releaseDiscovery.wait(timeout: .now() + 2)
+                return [mountedSource]
+            },
+            discoverImageCaptureSources: { [] },
+            scanSource: { _ in [] },
+            groupAssets: { _ in CaptureGroupingResult(captures: [], unknownFolders: []) },
+            duplicateStateResolver: { _, _, _, _ in [:] },
+            importCapturesAction: { _, _, _, _, _, _ in ImportSessionResult(captureResults: []) },
+            deleteCaptureFilesAction: { _ in }
+        )
+
+        store.refreshSources()
+
+        let discoveryStartedResult = await waitForSemaphore(discoveryStarted, timeout: .now() + 1)
+        #expect(discoveryStartedResult == .success)
+        #expect(store.sources.isEmpty)
+
+        releaseDiscovery.signal()
+        await store.awaitSourceRefresh()
+
+        #expect(store.sources.map(\.id) == ["volume"])
     }
 
     @Test
@@ -506,7 +546,7 @@ struct AppStoreTests {
     }
 
     @Test
-    func canImportSelectionRequiresReachableDestinationResolvedSelectionAndIdleState() throws {
+    func canImportSelectionRequiresReachableDestinationResolvedSelectionAndIdleState() async throws {
         let firstCapture = makeCapture(id: "clip-a")
         let store = AppStore(
             discoverVolumeSources: { [] },
@@ -522,6 +562,7 @@ struct AppStoreTests {
         defer { try? FileManager.default.removeItem(at: destinationURL) }
 
         store.destinationURL = destinationURL.appending(path: "Missing", directoryHint: .isDirectory)
+        await store.awaitDestinationAvailability()
         store.captures = [firstCapture]
         store.replaceSelectedCaptureIDs([firstCapture.id])
 
@@ -530,6 +571,7 @@ struct AppStoreTests {
         #expect(!store.canImportAllCaptures)
 
         store.destinationURL = destinationURL
+        await store.awaitDestinationAvailability()
         store.captures = [firstCapture]
         store.replaceSelectedCaptureIDs(["stale"])
 
@@ -791,7 +833,7 @@ struct AppStoreTests {
     }
 
     @Test
-    func persistedUnavailableDestinationStaysVisibleButBlocksImports() {
+    func persistedUnavailableDestinationStaysVisibleButBlocksImports() async {
         let suiteName = "AppStoreTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer {
@@ -817,6 +859,7 @@ struct AppStoreTests {
 
         store.captures = [capture]
         store.replaceSelectedCaptureIDs([capture.id])
+        await store.awaitDestinationAvailability()
 
         #expect(store.destinationURL == missingDestinationURL)
         #expect(store.destinationAvailability == .unavailable)
@@ -1106,6 +1149,52 @@ struct AppStoreTests {
         store.dismissSourceEjectionError()
 
         #expect(store.sourceEjectionErrorMessage == nil)
+    }
+
+    @Test
+    func mediaProcessingTrackerSummarizesBackgroundWork() {
+        let tracker = MediaProcessingTracker()
+
+        #expect(!tracker.hasActiveWork)
+        #expect(tracker.activeActivityCount == 0)
+
+        let thumbnailActivity = tracker.begin(kind: .thumbnail, fileName: "IMG_0001.JPG")
+
+        #expect(tracker.hasActiveWork)
+        #expect(tracker.activeActivityCount == 1)
+        #expect(tracker.toolbarStatusText == "Processing thumbnail")
+        #expect(tracker.detailText == "Generating thumbnail: IMG_0001.JPG")
+
+        let videoActivity = tracker.begin(kind: .videoFrame, fileName: "CLIP_0001.MP4")
+
+        #expect(tracker.activeActivityCount == 2)
+        #expect(tracker.toolbarStatusText == "2 media tasks")
+        #expect(tracker.detailText == "Processing 1 video task and 1 thumbnail task in the background")
+
+        let previewActivity = tracker.begin(kind: .videoPreview, fileName: "CLIP_0002.MP4")
+
+        #expect(tracker.activeActivityCount == 3)
+        #expect(tracker.toolbarStatusText == "3 media tasks")
+        #expect(tracker.detailText == "Processing 2 video tasks and 1 thumbnail task in the background")
+
+        tracker.finish(thumbnailActivity)
+
+        #expect(tracker.activeActivityCount == 2)
+        #expect(tracker.toolbarStatusText == "2 media tasks")
+        #expect(tracker.detailText == "Processing 2 video tasks in the background")
+
+        tracker.finish(videoActivity)
+
+        #expect(tracker.activeActivityCount == 1)
+        #expect(tracker.toolbarStatusText == "Preparing video")
+        #expect(tracker.detailText == "Preparing video preview: CLIP_0002.MP4")
+        #expect(tracker.accessibilityText == tracker.detailText)
+
+        tracker.finish(previewActivity)
+
+        #expect(!tracker.hasActiveWork)
+        #expect(tracker.activeActivityCount == 0)
+        #expect(tracker.toolbarStatusText.isEmpty)
     }
 
     nonisolated private func makeCapture(id: String, memberFiles: [SourceAssetFile] = []) -> LogicalCapture {

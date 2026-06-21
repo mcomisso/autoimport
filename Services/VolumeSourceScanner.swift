@@ -42,6 +42,7 @@ struct VolumeSourceScanner {
 
         var files: [SourceAssetFile] = []
         var unknownFileCount = 0
+        let standardizedRootPath = rootURL.standardizedFileURL.path(percentEncoded: false)
 
         for case let fileURL as URL in enumerator {
             try Task.checkCancellation()
@@ -69,7 +70,7 @@ struct VolumeSourceScanner {
             files.append(
                 SourceAssetFile(
                     sourceID: sourceID,
-                    relativePath: relativePath(for: fileURL, under: rootURL),
+                    relativePath: relativePath(for: fileURL, underStandardizedRootPath: standardizedRootPath),
                     fileURL: fileURL,
                     fileSize: Int64(values.fileSize ?? 0),
                     modificationDate: values.contentModificationDate ?? .distantPast,
@@ -83,8 +84,7 @@ struct VolumeSourceScanner {
         return files.sorted { $0.relativePath < $1.relativePath }
     }
 
-    private func relativePath(for fileURL: URL, under rootURL: URL) -> String {
-        let rootPath = rootURL.standardizedFileURL.path(percentEncoded: false)
+    private func relativePath(for fileURL: URL, underStandardizedRootPath rootPath: String) -> String {
         let filePath = fileURL.standardizedFileURL.path(percentEncoded: false)
 
         guard filePath.hasPrefix(rootPath) else {

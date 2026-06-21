@@ -40,4 +40,8 @@ enum MediaClassification: String, Codable, CaseIterable, Sendable {
             false
         }
     }
+
+    static func needsVideoPreviewCompatibilityURL(pathExtension: String) -> Bool {
+        pathExtension.lowercased() == "insv"
+    }
 }

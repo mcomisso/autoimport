@@ -2,6 +2,7 @@ import Foundation
 
 enum DestinationAvailability: Equatable, Sendable {
     case notSelected
+    case checking
     case reachable
     case unavailable
 

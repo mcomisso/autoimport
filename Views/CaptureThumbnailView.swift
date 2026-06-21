@@ -15,8 +15,43 @@ private struct CaptureThumbnailPreparedSource: Hashable, Sendable {
 
     init(fileURL: URL) {
         self.fileURL = fileURL
-        canonicalPath = fileURL.standardizedFileURL.resolvingSymlinksInPath().path(percentEncoded: false)
+        canonicalPath = fileURL.standardizedFileURL.path(percentEncoded: false)
         pathExtension = fileURL.pathExtension
+    }
+}
+
+private struct CaptureVideoPreviewURL: Sendable {
+    let url: URL
+    let temporaryURL: URL?
+}
+
+private enum CaptureVideoPreviewURLFactory {
+    static func makeURL(for source: CaptureThumbnailPreparedSource) -> CaptureVideoPreviewURL {
+        guard MediaClassification.needsVideoPreviewCompatibilityURL(pathExtension: source.pathExtension) else {
+            return CaptureVideoPreviewURL(url: source.fileURL, temporaryURL: nil)
+        }
+
+        let fileManager = FileManager.default
+        let directoryURL = fileManager.temporaryDirectory
+            .appending(path: "AutoImportVideoPreviews", directoryHint: .isDirectory)
+        let temporaryURL = directoryURL.appending(path: "\(UUID().uuidString).mp4")
+
+        do {
+            try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+            try fileManager.createSymbolicLink(at: temporaryURL, withDestinationURL: source.fileURL)
+            return CaptureVideoPreviewURL(url: temporaryURL, temporaryURL: temporaryURL)
+        } catch {
+            try? fileManager.removeItem(at: temporaryURL)
+            return CaptureVideoPreviewURL(url: source.fileURL, temporaryURL: nil)
+        }
+    }
+
+    static func removeTemporaryURL(_ url: URL?) {
+        guard let url else {
+            return
+        }
+
+        try? FileManager.default.removeItem(at: url)
     }
 }
 
@@ -122,6 +157,8 @@ private struct CaptureThumbnailTaskID: Hashable, Sendable {
 }
 
 struct CaptureThumbnailView: View {
+    @Environment(\.mediaProcessingTracker) private var mediaProcessingTracker
+
     private let thumbnailSource: CaptureThumbnailPreparedSource?
     private let effectivePreviewSource: CaptureThumbnailPreparedSource?
     private let size: CGSize
@@ -308,7 +345,12 @@ struct CaptureThumbnailView: View {
             return
         }
 
-        let loadedImage = await Self.cachedImage(for: thumbnailSource, targetSize: size, purpose: .thumbnail)
+        let loadedImage = await Self.cachedImage(
+            for: thumbnailSource,
+            targetSize: size,
+            purpose: .thumbnail,
+            mediaProcessingTracker: mediaProcessingTracker
+        )
         guard !Task.isCancelled else {
             return
         }
@@ -330,7 +372,12 @@ struct CaptureThumbnailView: View {
         loadedPreviewID = nil
         isLoadingPreviewImage = true
 
-        let loadedImage = await Self.cachedImage(for: effectivePreviewSource, targetSize: previewDisplaySize, purpose: .preview)
+        let loadedImage = await Self.cachedImage(
+            for: effectivePreviewSource,
+            targetSize: previewDisplaySize,
+            purpose: .preview,
+            mediaProcessingTracker: mediaProcessingTracker
+        )
         guard !Task.isCancelled else {
             return
         }
@@ -352,7 +399,8 @@ struct CaptureThumbnailView: View {
     private static func cachedImage(
         for source: CaptureThumbnailPreparedSource,
         targetSize: CGSize,
-        purpose: CaptureThumbnailPreviewCache.Purpose
+        purpose: CaptureThumbnailPreviewCache.Purpose,
+        mediaProcessingTracker: MediaProcessingTracker?
     ) async -> NSImage? {
         let scale = await MainActor.run { NSScreen.main?.backingScaleFactor ?? 2 }
         let key = CaptureThumbnailPreviewCache.Key(
@@ -363,14 +411,42 @@ struct CaptureThumbnailView: View {
         )
 
         let cachedImage = await imageCache.image(for: key) {
+            let activityID = await mediaProcessingTracker?.begin(
+                kind: processingActivityKind(for: source, purpose: purpose),
+                fileName: source.fileURL.lastPathComponent
+            )
+
+            let loadedImage: CachedCaptureImage?
             guard !Task.isCancelled else {
+                await mediaProcessingTracker?.finish(activityID)
                 return nil
             }
 
-            return await quickLookImage(for: source, key: key)
+            if let quickLookImage = await quickLookImage(for: source, key: key) {
+                loadedImage = quickLookImage
+            } else {
+                loadedImage = await videoFrameImage(for: source, key: key)
+            }
+
+            await mediaProcessingTracker?.finish(activityID)
+            return loadedImage
         }
 
         return cachedImage?.image
+    }
+
+    private static func processingActivityKind(
+        for source: CaptureThumbnailPreparedSource,
+        purpose: CaptureThumbnailPreviewCache.Purpose
+    ) -> MediaProcessingActivityKind {
+        if MediaClassification.supportsVideoPreview(pathExtension: source.pathExtension) {
+            return .videoFrame
+        }
+
+        switch purpose {
+        case .thumbnail, .preview:
+            return .thumbnail
+        }
     }
 
     private static func quickLookImage(
@@ -404,6 +480,72 @@ struct CaptureThumbnailView: View {
         )
     }
 
+    private static func videoFrameImage(
+        for source: CaptureThumbnailPreparedSource,
+        key: CaptureThumbnailPreviewCache.Key
+    ) async -> CachedCaptureImage? {
+        guard
+            !Task.isCancelled,
+            MediaClassification.supportsVideoPreview(pathExtension: source.pathExtension)
+        else {
+            return nil
+        }
+
+        let previewURL = CaptureVideoPreviewURLFactory.makeURL(for: source)
+        defer {
+            CaptureVideoPreviewURLFactory.removeTemporaryURL(previewURL.temporaryURL)
+        }
+
+        let asset = AVURLAsset(url: previewURL.url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(
+            width: CGFloat(key.pointWidth) * CGFloat(key.displayScale),
+            height: CGFloat(key.pointHeight) * CGFloat(key.displayScale)
+        )
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.75, preferredTimescale: 600)
+
+        do {
+            let requestedTime = await videoFrameTime(for: asset)
+            let generatedFrame = try await generator.image(at: requestedTime)
+            guard !Task.isCancelled else {
+                return nil
+            }
+
+            let image = NSImage(
+                cgImage: generatedFrame.image,
+                size: CGSize(
+                    width: CGFloat(generatedFrame.image.width) / CGFloat(key.displayScale),
+                    height: CGFloat(generatedFrame.image.height) / CGFloat(key.displayScale)
+                )
+            )
+
+            return CachedCaptureImage(
+                image: image,
+                estimatedByteCount: estimatedByteCount(for: image, key: key)
+            )
+        } catch {
+            return nil
+        }
+    }
+
+    private static func videoFrameTime(for asset: AVURLAsset) async -> CMTime {
+        guard
+            let duration = try? await asset.load(.duration),
+            duration.isNumeric,
+            duration.seconds.isFinite,
+            duration.seconds > 0
+        else {
+            return .zero
+        }
+
+        return CMTime(
+            seconds: min(max(duration.seconds * 0.1, 0), 2),
+            preferredTimescale: 600
+        )
+    }
+
     private static func estimatedByteCount(for image: NSImage, key: CaptureThumbnailPreviewCache.Key) -> Int {
         let requestedPixelCount = max(1, key.pointWidth)
             * max(1, key.pointHeight)
@@ -423,11 +565,14 @@ enum CaptureThumbnailPreviewPresentation {
 }
 
 private struct PreviewVideoPlayerView: View {
+    @Environment(\.mediaProcessingTracker) private var mediaProcessingTracker
+
     let source: CaptureThumbnailPreparedSource
     let width: CGFloat
     let height: CGFloat
     let autoplays: Bool
     @Binding var player: AVPlayer?
+    @State private var temporaryPlaybackURL: URL?
 
     var body: some View {
         Group {
@@ -440,17 +585,37 @@ private struct PreviewVideoPlayerView: View {
         }
         .frame(width: width, height: height)
         .task(id: source.canonicalPath) {
+            CaptureVideoPreviewURLFactory.removeTemporaryURL(temporaryPlaybackURL)
+            temporaryPlaybackURL = nil
+
+            let activityID = mediaProcessingTracker?.begin(
+                kind: .videoPreview,
+                fileName: source.fileURL.lastPathComponent
+            )
+            let previewURL = await Task.detached(priority: .userInitiated) {
+                CaptureVideoPreviewURLFactory.makeURL(for: source)
+            }.value
+            mediaProcessingTracker?.finish(activityID)
+
+            guard !Task.isCancelled else {
+                CaptureVideoPreviewURLFactory.removeTemporaryURL(previewURL.temporaryURL)
+                return
+            }
+
+            temporaryPlaybackURL = previewURL.temporaryURL
+            let playbackURL = previewURL.url
+
             let activePlayer: AVPlayer
-            if let player, (player.currentItem?.asset as? AVURLAsset)?.url == source.fileURL {
+            if let player, (player.currentItem?.asset as? AVURLAsset)?.url == playbackURL {
                 activePlayer = player
             } else {
-                let newPlayer = AVPlayer(url: source.fileURL)
+                let newPlayer = AVPlayer(url: playbackURL)
                 player = newPlayer
                 activePlayer = newPlayer
             }
 
             if autoplays {
-                activePlayer.seek(to: .zero)
+                await activePlayer.seek(to: .zero)
                 activePlayer.play()
             } else {
                 activePlayer.pause()
@@ -459,6 +624,8 @@ private struct PreviewVideoPlayerView: View {
         .onDisappear {
             player?.pause()
             player = nil
+            CaptureVideoPreviewURLFactory.removeTemporaryURL(temporaryPlaybackURL)
+            temporaryPlaybackURL = nil
         }
     }
 }
