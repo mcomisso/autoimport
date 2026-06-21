@@ -1,3 +1,4 @@
+import Dispatch
 import Foundation
 import Testing
 
@@ -250,6 +251,56 @@ struct AppStoreTests {
     }
 
     @Test
+    func automaticImportDoesNotRunByDefaultForDetectedMountedMedia() async throws {
+        let suiteName = "AppStoreTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let source = SourceDevice(
+            id: "volume",
+            displayName: "DJI Camera",
+            kind: .mountedVolume,
+            rootURL: URL(fileURLWithPath: "/Volumes/DJI"),
+            subtitle: "Mounted",
+            state: .ready
+        )
+        let capture = makeCapture(id: "unique")
+        let scanAttemptCount = LockedTestValue(0)
+        let importAttemptCount = LockedTestValue(0)
+        let store = AppStore(
+            preferences: UserPreferences(userDefaults: defaults),
+            discoverVolumeSources: { [source] },
+            discoverImageCaptureSources: { [] },
+            scanSource: { _ in
+                scanAttemptCount.update { $0 += 1 }
+                return []
+            },
+            groupAssets: { _ in CaptureGroupingResult(captures: [capture], unknownFolders: []) },
+            duplicateStateResolver: { _, _, _, _ in [:] },
+            importCapturesAction: { _, _, _, _, _, _ in
+                importAttemptCount.update { $0 += 1 }
+                return ImportSessionResult(captureResults: [])
+            },
+            deleteCaptureFilesAction: { _ in }
+        )
+
+        let destinationURL = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destinationURL) }
+
+        store.destinationURL = destinationURL
+        store.refreshSourcesAndLoadPreferredSource(preferNewDetectedMedia: true)
+        await store.awaitDuplicateDetection()
+        await store.awaitAutomaticImport()
+
+        #expect(store.automaticallyImportDetectedMedia == false)
+        #expect(store.selectedSource == nil)
+        #expect(scanAttemptCount.get() == 0)
+        #expect(importAttemptCount.get() == 0)
+    }
+
+    @Test
     func automaticImportOnlyImportsUniqueCapturesFromDetectedMountedMedia() async throws {
         let source = SourceDevice(
             id: "volume",
@@ -377,8 +428,11 @@ struct AppStoreTests {
         )
 
         store.captures = [firstCapture, secondCapture]
-        store.selectedCaptureIDs = ["stale", firstCapture.id]
+        store.replaceSelectedCaptureIDs(["stale", firstCapture.id])
 
+        #expect(store.selectedCaptureIDs == [firstCapture.id])
+        #expect(store.selectedCaptureCount == 1)
+        #expect(store.selectedCapturesTotalSize == firstCapture.totalSize)
         #expect(!store.areAllCapturesSelected)
         #expect(store.canSelectAllCaptures)
         #expect(store.canDeselectAllCaptures)
@@ -406,6 +460,52 @@ struct AppStoreTests {
     }
 
     @Test
+    func togglingMarksUpdatesSelectionTotalsAndIgnoresStaleIDs() {
+        let firstCapture = makeCapture(
+            id: "clip-a",
+            memberFiles: [
+                makeAsset("DCIM/100MEDIA/CLIP_A.MP4", fileSize: 10),
+            ]
+        )
+        let secondCapture = makeCapture(
+            id: "clip-b",
+            memberFiles: [
+                makeAsset("DCIM/100MEDIA/CLIP_B.MP4", fileSize: 20),
+            ]
+        )
+        let store = AppStore(
+            discoverVolumeSources: { [] },
+            discoverImageCaptureSources: { [] },
+            scanSource: { _ in [] },
+            groupAssets: { _ in CaptureGroupingResult(captures: [], unknownFolders: []) },
+            duplicateStateResolver: { _, _, _, _ in [:] },
+            importCapturesAction: { _, _, _, _, _, _ in ImportSessionResult(captureResults: []) },
+            deleteCaptureFilesAction: { _ in }
+        )
+
+        store.captures = [firstCapture, secondCapture]
+
+        store.setCaptureSelected(id: firstCapture.id, isSelected: true)
+        store.setCaptureSelected(id: "missing", isSelected: true)
+
+        #expect(store.selectedCaptureIDs == [firstCapture.id])
+        #expect(store.selectedCaptureCount == 1)
+        #expect(store.selectedCapturesTotalSize == 10)
+
+        store.toggleMarks(for: [firstCapture.id, secondCapture.id, "missing"])
+
+        #expect(store.selectedCaptureIDs == [firstCapture.id, secondCapture.id])
+        #expect(store.selectedCaptureCount == 2)
+        #expect(store.selectedCapturesTotalSize == 30)
+
+        store.toggleMarks(for: [firstCapture.id, secondCapture.id])
+
+        #expect(store.selectedCaptureIDs.isEmpty)
+        #expect(store.selectedCaptureCount == 0)
+        #expect(store.selectedCapturesTotalSize == 0)
+    }
+
+    @Test
     func canImportSelectionRequiresReachableDestinationResolvedSelectionAndIdleState() throws {
         let firstCapture = makeCapture(id: "clip-a")
         let store = AppStore(
@@ -423,7 +523,7 @@ struct AppStoreTests {
 
         store.destinationURL = destinationURL.appending(path: "Missing", directoryHint: .isDirectory)
         store.captures = [firstCapture]
-        store.selectedCaptureIDs = [firstCapture.id]
+        store.replaceSelectedCaptureIDs([firstCapture.id])
 
         #expect(store.destinationAvailability == .unavailable)
         #expect(!store.canImportSelection)
@@ -431,18 +531,189 @@ struct AppStoreTests {
 
         store.destinationURL = destinationURL
         store.captures = [firstCapture]
-        store.selectedCaptureIDs = ["stale"]
+        store.replaceSelectedCaptureIDs(["stale"])
 
         #expect(store.destinationAvailability == .reachable)
         #expect(!store.canImportSelection)
 
-        store.selectedCaptureIDs = [firstCapture.id]
+        store.replaceSelectedCaptureIDs([firstCapture.id])
 
         #expect(store.canImportSelection)
 
         store.isImporting = true
 
         #expect(!store.canImportSelection)
+    }
+
+    @Test
+    func staleSourceLoadCannotOverwriteNewerLoadedSource() async {
+        let slowSource = SourceDevice(
+            id: "slow",
+            displayName: "Slow Camera",
+            kind: .mountedVolume,
+            rootURL: URL(fileURLWithPath: "/Volumes/Slow"),
+            subtitle: "Mounted",
+            state: .ready
+        )
+        let fastSource = SourceDevice(
+            id: "fast",
+            displayName: "Fast Camera",
+            kind: .mountedVolume,
+            rootURL: URL(fileURLWithPath: "/Volumes/Fast"),
+            subtitle: "Mounted",
+            state: .ready
+        )
+        let slowScanStarted = DispatchSemaphore(value: 0)
+        let releaseSlowScan = DispatchSemaphore(value: 0)
+        let store = AppStore(
+            discoverVolumeSources: { [slowSource, fastSource] },
+            discoverImageCaptureSources: { [] },
+            scanSource: { source in
+                if source.id == slowSource.id {
+                    slowScanStarted.signal()
+                    _ = releaseSlowScan.wait(timeout: .now() + 2)
+                    return [
+                        makeAsset("DCIM/100MEDIA/SLOW.MP4", sourceID: slowSource.id),
+                    ]
+                }
+
+                return [
+                    makeAsset("DCIM/100MEDIA/FAST.MP4", sourceID: fastSource.id),
+                ]
+            },
+            groupAssets: { files in
+                guard let sourceID = files.first?.sourceID else {
+                    return CaptureGroupingResult(captures: [], unknownFolders: [])
+                }
+
+                return CaptureGroupingResult(
+                    captures: [makeCapture(id: sourceID, memberFiles: files)],
+                    unknownFolders: []
+                )
+            },
+            duplicateStateResolver: { _, _, _, _ in [:] },
+            importCapturesAction: { _, _, _, _, _, _ in ImportSessionResult(captureResults: []) },
+            deleteCaptureFilesAction: { _ in }
+        )
+
+        store.loadSource(slowSource)
+        let slowScanStartedResult = await waitForSemaphore(slowScanStarted, timeout: .now() + 2)
+        #expect(slowScanStartedResult == .success)
+
+        store.loadSource(fastSource)
+        await store.awaitSourceLoading()
+
+        releaseSlowScan.signal()
+        try? await Task.sleep(for: .milliseconds(100))
+
+        #expect(store.selectedSource?.id == fastSource.id)
+        #expect(store.captureIDs == [fastSource.id])
+        #expect(store.selectedCaptureIDs == [fastSource.id])
+        #expect(!store.isLoadingSource)
+    }
+
+    @Test
+    func cancelledImportCannotPublishStaleResultAfterSourceReload() async throws {
+        let importingSource = SourceDevice(
+            id: "importing",
+            displayName: "Importing Camera",
+            kind: .mountedVolume,
+            rootURL: URL(fileURLWithPath: "/Volumes/Importing"),
+            subtitle: "Mounted",
+            state: .ready
+        )
+        let replacementSource = SourceDevice(
+            id: "replacement",
+            displayName: "Replacement Camera",
+            kind: .mountedVolume,
+            rootURL: URL(fileURLWithPath: "/Volumes/Replacement"),
+            subtitle: "Mounted",
+            state: .ready
+        )
+        let capture = makeCapture(
+            id: "clip-a",
+            memberFiles: [
+                makeAsset("DCIM/100MEDIA/CLIP_A.MP4", sourceID: importingSource.id),
+            ]
+        )
+        let importStarted = DispatchSemaphore(value: 0)
+        let releaseImport = DispatchSemaphore(value: 0)
+        let observedCancellation = LockedTestValue(false)
+        let store = AppStore(
+            discoverVolumeSources: { [importingSource, replacementSource] },
+            discoverImageCaptureSources: { [] },
+            scanSource: { source in
+                source.id == importingSource.id
+                    ? [makeAsset("DCIM/100MEDIA/CLIP_A.MP4", sourceID: importingSource.id)]
+                    : []
+            },
+            groupAssets: { files in
+                guard !files.isEmpty else {
+                    return CaptureGroupingResult(captures: [], unknownFolders: [])
+                }
+
+                return CaptureGroupingResult(captures: [capture], unknownFolders: [])
+            },
+            duplicateStateResolver: { _, _, _, _ in [:] },
+            importCapturesAction: { captures, _, _, _, _, onProgress in
+                importStarted.signal()
+                onProgress(ImportProgress(
+                    completedCaptures: 0,
+                    totalCaptures: captures.count,
+                    completedBytes: 0,
+                    totalBytes: 1,
+                    currentCaptureName: captures.first?.displayName
+                ))
+
+                while releaseImport.wait(timeout: .now() + .milliseconds(10)) == .timedOut {
+                    if Task.isCancelled {
+                        observedCancellation.set(true)
+                        throw CancellationError()
+                    }
+                }
+
+                return ImportSessionResult(
+                    captureResults: captures.map { capture in
+                        CaptureImportResult(
+                            captureID: capture.id,
+                            status: .imported,
+                            importedURLs: [],
+                            isDeleteEligible: true
+                        )
+                    }
+                )
+            },
+            deleteCaptureFilesAction: { _ in }
+        )
+
+        let destinationURL = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destinationURL) }
+
+        store.destinationURL = destinationURL
+        store.loadSource(importingSource)
+        await store.awaitSourceLoading()
+        store.replaceSelectedCaptureIDs([capture.id])
+
+        let importTask = Task {
+            await store.importSelectedCaptures(overwriteDuplicates: false)
+        }
+        let importStartedResult = await waitForSemaphore(importStarted, timeout: .now() + 2)
+        #expect(importStartedResult == .success)
+
+        store.loadSource(replacementSource)
+        for _ in 0..<100 where !observedCancellation.get() {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        releaseImport.signal()
+        await importTask.value
+        await store.awaitSourceLoading()
+
+        #expect(observedCancellation.get())
+        #expect(!store.isImporting)
+        #expect(store.importProgress == nil)
+        #expect(store.lastImportResult == nil)
+        #expect(store.pendingDeletionCaptureIDs.isEmpty)
+        #expect(store.selectedSource?.id == replacementSource.id)
     }
 
     @Test
@@ -507,7 +778,7 @@ struct AppStoreTests {
         store.refreshSources()
         store.loadSource(source)
         await store.awaitSourceLoading()
-        store.selectedCaptureIDs = ["imported", "failed"]
+        store.replaceSelectedCaptureIDs(["imported", "failed"])
 
         await store.importSelectedCaptures(overwriteDuplicates: false)
 
@@ -545,7 +816,7 @@ struct AppStoreTests {
         )
 
         store.captures = [capture]
-        store.selectedCaptureIDs = [capture.id]
+        store.replaceSelectedCaptureIDs([capture.id])
 
         #expect(store.destinationURL == missingDestinationURL)
         #expect(store.destinationAvailability == .unavailable)
@@ -699,7 +970,7 @@ struct AppStoreTests {
         #expect(deletedCaptureIDs.get().isEmpty)
 
         store.captures = [videoCapture]
-        store.selectedCaptureIDs = [videoCapture.id]
+        store.replaceSelectedCaptureIDs([videoCapture.id])
         store.pendingDeletionCaptureIDs = [videoCapture.id]
         store.isImporting = true
 
@@ -837,7 +1108,7 @@ struct AppStoreTests {
         #expect(store.sourceEjectionErrorMessage == nil)
     }
 
-    private func makeCapture(id: String, memberFiles: [SourceAssetFile] = []) -> LogicalCapture {
+    nonisolated private func makeCapture(id: String, memberFiles: [SourceAssetFile] = []) -> LogicalCapture {
         LogicalCapture(
             id: id,
             displayName: id,
@@ -849,15 +1120,19 @@ struct AppStoreTests {
         )
     }
 
-    private func makeAsset(_ relativePath: String) -> SourceAssetFile {
+    nonisolated private func makeAsset(
+        _ relativePath: String,
+        sourceID: String = "volume",
+        fileSize: Int64 = 12
+    ) -> SourceAssetFile {
         let rootURL = URL(fileURLWithPath: "/Volumes/DJI", isDirectory: true)
         let fileURL = rootURL.appending(path: relativePath)
 
         return SourceAssetFile(
-            sourceID: "volume",
+            sourceID: sourceID,
             relativePath: relativePath,
             fileURL: fileURL,
-            fileSize: 12,
+            fileSize: fileSize,
             modificationDate: .distantPast,
             classification: .classify(pathExtension: fileURL.pathExtension),
             duration: nil,
@@ -870,6 +1145,17 @@ struct AppStoreTests {
             .appending(path: "AutoImportTests-\(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    nonisolated private func waitForSemaphore(
+        _ semaphore: DispatchSemaphore,
+        timeout: DispatchTime
+    ) async -> DispatchTimeoutResult {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: semaphore.wait(timeout: timeout))
+            }
+        }
     }
 }
 

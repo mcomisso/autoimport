@@ -7,23 +7,99 @@ struct DestinationToolbarView: View {
     let onImportAll: () -> Void
 
     var body: some View {
+        VStack(spacing: 0) {
+            DestinationToolbarStatusSection(store: store)
+
+            DestinationToolbarControls(
+                store: store,
+                onChooseDestination: onChooseDestination,
+                onImportSelected: onImportSelected,
+                onImportAll: onImportAll
+            )
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .background(.thinMaterial)
+    }
+}
+
+private struct DestinationToolbarStatusSection: View {
+    let store: AppStore
+
+    var body: some View {
+        let progress = store.importProgress
+        let isImporting = store.isImporting
+        let capacity = store.destinationCapacity
+        let hasStatus = (progress != nil && isImporting) || capacity != nil
+
         VStack(spacing: 12) {
-            if let progress = store.importProgress, store.isImporting {
-                progressBanner(progress)
+            if let progress, isImporting {
+                DestinationImportProgressBanner(progress: progress)
             }
 
-            if let capacity = store.destinationCapacity {
+            if let capacity {
                 DestinationCapacityChart(
                     capacity: capacity,
                     incomingBytes: store.selectedCapturesTotalSize
                 )
             }
-
-            mainRow
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
-        .background(.thinMaterial)
+        .padding(.bottom, hasStatus ? 12 : 0)
+    }
+}
+
+private struct DestinationImportProgressBanner: View {
+    let progress: ImportProgress
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                ProgressView(value: progress.fractionComplete)
+                    .progressViewStyle(.linear)
+
+                Text("\(Int(progress.fractionComplete * 100))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+            }
+
+            HStack(spacing: 8) {
+                Text("\(progress.completedCaptures) / \(progress.totalCaptures)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+
+                Text("·")
+                    .foregroundStyle(.tertiary)
+
+                Text("\(CaptureDisplayFormatter.fileSize(progress.completedBytes)) of \(CaptureDisplayFormatter.fileSize(progress.totalBytes))")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+
+                if let name = progress.currentCaptureName {
+                    Text("·")
+                        .foregroundStyle(.tertiary)
+
+                    Text(name)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer()
+            }
+        }
+    }
+}
+
+private struct DestinationToolbarControls: View {
+    @Bindable var store: AppStore
+    let onChooseDestination: () -> Void
+    let onImportSelected: () -> Void
+    let onImportAll: () -> Void
+
+    var body: some View {
+        mainRow
     }
 
     private var mainRow: some View {
@@ -216,49 +292,8 @@ struct DestinationToolbarView: View {
         .disabled(!store.canImportSelection)
     }
 
-    @ViewBuilder
-    private func progressBanner(_ progress: ImportProgress) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 10) {
-                ProgressView(value: progress.fractionComplete)
-                    .progressViewStyle(.linear)
-
-                Text("\(Int(progress.fractionComplete * 100))%")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 44, alignment: .trailing)
-            }
-
-            HStack(spacing: 8) {
-                Text("\(progress.completedCaptures) / \(progress.totalCaptures)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-
-                Text("·")
-                    .foregroundStyle(.tertiary)
-
-                Text("\(CaptureDisplayFormatter.fileSize(progress.completedBytes)) of \(CaptureDisplayFormatter.fileSize(progress.totalBytes))")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-
-                if let name = progress.currentCaptureName {
-                    Text("·")
-                        .foregroundStyle(.tertiary)
-
-                    Text(name)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-
-                Spacer()
-            }
-        }
-    }
-
     private var markedSummary: String {
-        let count = store.selectedCaptureIDs.count
+        let count = store.selectedCaptureCount
         guard count > 0 else {
             return "No captures marked"
         }

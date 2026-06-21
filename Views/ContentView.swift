@@ -144,7 +144,7 @@ struct ContentView: View {
 
         importAllRequested = importAll
 
-        if !store.duplicateCapturesInSelection.isEmpty {
+        if store.hasDuplicateCapturesInSelection {
             showingOverwriteConfirmation = true
         } else {
             Task {

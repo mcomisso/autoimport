@@ -5,6 +5,19 @@ import SwiftUI
 
 private struct CachedCaptureImage: @unchecked Sendable {
     let image: NSImage
+    let estimatedByteCount: Int
+}
+
+private struct CaptureThumbnailPreparedSource: Hashable, Sendable {
+    let fileURL: URL
+    let canonicalPath: String
+    let pathExtension: String
+
+    init(fileURL: URL) {
+        self.fileURL = fileURL
+        canonicalPath = fileURL.standardizedFileURL.resolvingSymlinksInPath().path(percentEncoded: false)
+        pathExtension = fileURL.pathExtension
+    }
 }
 
 private actor CaptureThumbnailPreviewCache {
@@ -20,8 +33,8 @@ private actor CaptureThumbnailPreviewCache {
         let displayScale: Double
         let purpose: Purpose
 
-        init(fileURL: URL, targetSize: CGSize, scale: CGFloat, purpose: Purpose) {
-            urlPath = fileURL.standardizedFileURL.resolvingSymlinksInPath().path(percentEncoded: false)
+        init(source: CaptureThumbnailPreparedSource, targetSize: CGSize, scale: CGFloat, purpose: Purpose) {
+            urlPath = source.canonicalPath
             pointWidth = max(1, Int(targetSize.width.rounded(.up)))
             pointHeight = max(1, Int(targetSize.height.rounded(.up)))
             displayScale = max(1, (Double(scale) * 100).rounded() / 100)
@@ -30,8 +43,10 @@ private actor CaptureThumbnailPreviewCache {
     }
 
     private let maximumEntryCount = 96
+    private let maximumTotalByteCount = 32 * 1024 * 1024
     private var images: [Key: CachedCaptureImage] = [:]
     private var recentlyUsedKeys: [Key] = []
+    private var totalByteCount = 0
     private var inFlightLoads: [Key: Task<CachedCaptureImage?, Never>] = [:]
 
     func image(for key: Key, load: @escaping @Sendable () async -> CachedCaptureImage?) async -> CachedCaptureImage? {
@@ -60,14 +75,26 @@ private actor CaptureThumbnailPreviewCache {
     }
 
     private func store(_ image: CachedCaptureImage, for key: Key) {
+        if let existingImage = images[key] {
+            totalByteCount -= existingImage.estimatedByteCount
+        }
+
         images[key] = image
+        totalByteCount += image.estimatedByteCount
         markRecentlyUsed(key)
 
-        while recentlyUsedKeys.count > maximumEntryCount, let keyToRemove = recentlyUsedKeys.first {
+        while shouldEvictEntries, let keyToRemove = recentlyUsedKeys.first {
             recentlyUsedKeys.removeFirst()
-            images[keyToRemove] = nil
+            if let removedImage = images.removeValue(forKey: keyToRemove) {
+                totalByteCount -= removedImage.estimatedByteCount
+            }
             inFlightLoads[keyToRemove] = nil
         }
+    }
+
+    private var shouldEvictEntries: Bool {
+        recentlyUsedKeys.count > maximumEntryCount
+            || (totalByteCount > maximumTotalByteCount && recentlyUsedKeys.count > 1)
     }
 
     private func markRecentlyUsed(_ key: Key) {
@@ -76,28 +103,84 @@ private actor CaptureThumbnailPreviewCache {
     }
 }
 
+private struct CaptureThumbnailTaskID: Hashable, Sendable {
+    let purpose: CaptureThumbnailPreviewCache.Purpose
+    let pointWidth: Int
+    let pointHeight: Int
+    let urlPath: String?
+
+    init(
+        source: CaptureThumbnailPreparedSource?,
+        targetSize: CGSize,
+        purpose: CaptureThumbnailPreviewCache.Purpose
+    ) {
+        self.purpose = purpose
+        pointWidth = max(1, Int(targetSize.width.rounded(.up)))
+        pointHeight = max(1, Int(targetSize.height.rounded(.up)))
+        urlPath = source?.canonicalPath
+    }
+}
+
 struct CaptureThumbnailView: View {
-    let thumbnailFileURL: URL?
-    let previewFileURL: URL?
-    var size: CGSize = CGSize(width: 88, height: 58)
-    var cornerRadius: CGFloat = 10
-    var previewPresentation: CaptureThumbnailPreviewPresentation = .popover
+    private let thumbnailSource: CaptureThumbnailPreparedSource?
+    private let effectivePreviewSource: CaptureThumbnailPreparedSource?
+    private let size: CGSize
+    private let cornerRadius: CGFloat
+    private let previewPresentation: CaptureThumbnailPreviewPresentation
+    private let previewDisplaySize: CGSize
+    private let isPreviewVideo: Bool
+    private let thumbnailTaskID: CaptureThumbnailTaskID
+    private let previewTaskID: CaptureThumbnailTaskID
 
     @State private var image: NSImage?
-    @State private var loadedThumbnailID: String?
+    @State private var loadedThumbnailID: CaptureThumbnailTaskID?
     @State private var isShowingPreview = false
     @State private var previewImage: NSImage?
-    @State private var loadedPreviewID: String?
+    @State private var loadedPreviewID: CaptureThumbnailTaskID?
     @State private var isLoadingPreviewImage = false
     @State private var player: AVPlayer?
 
     private static let imageCache = CaptureThumbnailPreviewCache()
 
+    init(
+        thumbnailFileURL: URL?,
+        previewFileURL: URL?,
+        size: CGSize = CGSize(width: 88, height: 58),
+        cornerRadius: CGFloat = 10,
+        previewPresentation: CaptureThumbnailPreviewPresentation = .popover
+    ) {
+        let preparedThumbnailSource = thumbnailFileURL.map(CaptureThumbnailPreparedSource.init(fileURL:))
+        let preparedPreviewSource = previewFileURL.map(CaptureThumbnailPreparedSource.init(fileURL:))
+        let effectivePreviewSource = preparedPreviewSource ?? preparedThumbnailSource
+        let thumbnailSource = preparedThumbnailSource ?? effectivePreviewSource
+        let previewDisplaySize = Self.previewDisplaySize(for: size)
+
+        self.thumbnailSource = thumbnailSource
+        self.effectivePreviewSource = effectivePreviewSource
+        self.size = size
+        self.cornerRadius = cornerRadius
+        self.previewPresentation = previewPresentation
+        self.previewDisplaySize = previewDisplaySize
+        isPreviewVideo = effectivePreviewSource.map {
+            MediaClassification.supportsVideoPreview(pathExtension: $0.pathExtension)
+        } ?? false
+        thumbnailTaskID = CaptureThumbnailTaskID(
+            source: thumbnailSource,
+            targetSize: size,
+            purpose: .thumbnail
+        )
+        previewTaskID = CaptureThumbnailTaskID(
+            source: effectivePreviewSource,
+            targetSize: previewDisplaySize,
+            purpose: .preview
+        )
+    }
+
     var body: some View {
         Group {
-            if previewPresentation == .inlinePlayableVideo, isPreviewVideo, let effectivePreviewURL {
+            if previewPresentation == .inlinePlayableVideo, isPreviewVideo, let effectivePreviewSource {
                 PreviewVideoPlayerView(
-                    url: effectivePreviewURL,
+                    source: effectivePreviewSource,
                     width: size.width,
                     height: size.height,
                     autoplays: false,
@@ -116,11 +199,11 @@ struct CaptureThumbnailView: View {
     }
 
     private var placeholderSymbolName: String {
-        guard let fileURL = thumbnailSourceURL else {
+        guard let thumbnailSource else {
             return "photo.on.rectangle.angled"
         }
 
-        if MediaClassification.supportsVideoPreview(pathExtension: fileURL.pathExtension) {
+        if MediaClassification.supportsVideoPreview(pathExtension: thumbnailSource.pathExtension) {
             return "video.fill"
         }
 
@@ -129,7 +212,7 @@ struct CaptureThumbnailView: View {
 
     @ViewBuilder
     private var popoverThumbnail: some View {
-        if effectivePreviewURL != nil {
+        if effectivePreviewSource != nil {
             Button {
                 isShowingPreview = true
             } label: {
@@ -138,6 +221,11 @@ struct CaptureThumbnailView: View {
             .buttonStyle(.plain)
             .popover(isPresented: $isShowingPreview) {
                 previewBody
+            }
+            .onChange(of: isShowingPreview) { _, isShowingPreview in
+                if !isShowingPreview {
+                    clearPreviewState()
+                }
             }
         } else {
             thumbnailBody
@@ -160,7 +248,7 @@ struct CaptureThumbnailView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if effectivePreviewURL != nil {
+            if effectivePreviewSource != nil {
                 Image(systemName: previewSymbolName)
                     .font(.system(size: min(size.width, size.height) * 0.24, weight: .semibold))
                     .foregroundStyle(.white)
@@ -176,13 +264,11 @@ struct CaptureThumbnailView: View {
 
     @ViewBuilder
     private var previewBody: some View {
-        let displaySize = previewDisplaySize
-
-        if isPreviewVideo, let effectivePreviewURL {
+        if isPreviewVideo, let effectivePreviewSource {
             PreviewVideoPlayerView(
-                url: effectivePreviewURL,
-                width: displaySize.width,
-                height: displaySize.height,
+                source: effectivePreviewSource,
+                width: previewDisplaySize.width,
+                height: previewDisplaySize.height,
                 autoplays: true,
                 player: $player
             )
@@ -198,7 +284,7 @@ struct CaptureThumbnailView: View {
                     ContentUnavailableView("Preview unavailable", systemImage: "eye.slash")
                 }
             }
-            .frame(width: displaySize.width, height: displaySize.height)
+            .frame(width: previewDisplaySize.width, height: previewDisplaySize.height)
             .padding(16)
             .task(id: previewTaskID) {
                 await loadPreviewImage(taskID: previewTaskID)
@@ -206,47 +292,23 @@ struct CaptureThumbnailView: View {
         }
     }
 
-    private var thumbnailSourceURL: URL? {
-        thumbnailFileURL ?? effectivePreviewURL
-    }
-
-    private var effectivePreviewURL: URL? {
-        previewFileURL ?? thumbnailFileURL
-    }
-
-    private var previewDisplaySize: CGSize {
+    private static func previewDisplaySize(for size: CGSize) -> CGSize {
         CGSize(width: max(size.width * 5.5, 420), height: max(size.height * 5.5, 260))
-    }
-
-    private var isPreviewVideo: Bool {
-        guard let effectivePreviewURL else {
-            return false
-        }
-
-        return MediaClassification.supportsVideoPreview(pathExtension: effectivePreviewURL.pathExtension)
     }
 
     private var previewSymbolName: String {
         isPreviewVideo ? "play.fill" : "arrow.up.left.and.arrow.down.right"
     }
 
-    private var thumbnailTaskID: String {
-        Self.taskID(for: thumbnailSourceURL, targetSize: size, purpose: .thumbnail)
-    }
-
-    private var previewTaskID: String {
-        Self.taskID(for: effectivePreviewURL, targetSize: previewDisplaySize, purpose: .preview)
-    }
-
     @MainActor
-    private func loadThumbnailImage(taskID: String) async {
-        guard let fileURL = thumbnailSourceURL else {
+    private func loadThumbnailImage(taskID: CaptureThumbnailTaskID) async {
+        guard let thumbnailSource else {
             image = nil
             loadedThumbnailID = nil
             return
         }
 
-        let loadedImage = await Self.cachedImage(for: fileURL, targetSize: size, purpose: .thumbnail)
+        let loadedImage = await Self.cachedImage(for: thumbnailSource, targetSize: size, purpose: .thumbnail)
         guard !Task.isCancelled else {
             return
         }
@@ -256,8 +318,8 @@ struct CaptureThumbnailView: View {
     }
 
     @MainActor
-    private func loadPreviewImage(taskID: String) async {
-        guard let effectivePreviewURL, !isPreviewVideo else {
+    private func loadPreviewImage(taskID: CaptureThumbnailTaskID) async {
+        guard let effectivePreviewSource, !isPreviewVideo else {
             previewImage = nil
             loadedPreviewID = nil
             isLoadingPreviewImage = false
@@ -268,7 +330,7 @@ struct CaptureThumbnailView: View {
         loadedPreviewID = nil
         isLoadingPreviewImage = true
 
-        let loadedImage = await Self.cachedImage(for: effectivePreviewURL, targetSize: previewDisplaySize, purpose: .preview)
+        let loadedImage = await Self.cachedImage(for: effectivePreviewSource, targetSize: previewDisplaySize, purpose: .preview)
         guard !Task.isCancelled else {
             return
         }
@@ -278,14 +340,23 @@ struct CaptureThumbnailView: View {
         isLoadingPreviewImage = false
     }
 
+    @MainActor
+    private func clearPreviewState() {
+        previewImage = nil
+        loadedPreviewID = nil
+        isLoadingPreviewImage = false
+        player?.pause()
+        player = nil
+    }
+
     private static func cachedImage(
-        for fileURL: URL,
+        for source: CaptureThumbnailPreparedSource,
         targetSize: CGSize,
         purpose: CaptureThumbnailPreviewCache.Purpose
     ) async -> NSImage? {
         let scale = await MainActor.run { NSScreen.main?.backingScaleFactor ?? 2 }
         let key = CaptureThumbnailPreviewCache.Key(
-            fileURL: fileURL,
+            source: source,
             targetSize: targetSize,
             scale: scale,
             purpose: purpose
@@ -296,19 +367,22 @@ struct CaptureThumbnailView: View {
                 return nil
             }
 
-            return await quickLookImage(for: fileURL, key: key)
+            return await quickLookImage(for: source, key: key)
         }
 
         return cachedImage?.image
     }
 
-    private static func quickLookImage(for fileURL: URL, key: CaptureThumbnailPreviewCache.Key) async -> CachedCaptureImage? {
+    private static func quickLookImage(
+        for source: CaptureThumbnailPreparedSource,
+        key: CaptureThumbnailPreviewCache.Key
+    ) async -> CachedCaptureImage? {
         guard !Task.isCancelled else {
             return nil
         }
 
         let request = QLThumbnailGenerator.Request(
-            fileAt: fileURL,
+            fileAt: source.fileURL,
             size: CGSize(width: CGFloat(key.pointWidth), height: CGFloat(key.pointHeight)),
             scale: CGFloat(key.displayScale),
             representationTypes: .thumbnail
@@ -324,22 +398,22 @@ struct CaptureThumbnailView: View {
             return nil
         }
 
-        return CachedCaptureImage(image: image)
+        return CachedCaptureImage(
+            image: image,
+            estimatedByteCount: estimatedByteCount(for: image, key: key)
+        )
     }
 
-    private static func taskID(
-        for fileURL: URL?,
-        targetSize: CGSize,
-        purpose: CaptureThumbnailPreviewCache.Purpose
-    ) -> String {
-        guard let fileURL else {
-            return "\(purpose.rawValue):none"
+    private static func estimatedByteCount(for image: NSImage, key: CaptureThumbnailPreviewCache.Key) -> Int {
+        let requestedPixelCount = max(1, key.pointWidth)
+            * max(1, key.pointHeight)
+            * max(1, Int(key.displayScale.rounded(.up)))
+            * max(1, Int(key.displayScale.rounded(.up)))
+        let representationPixelCount = image.representations.reduce(0) { pixelCount, representation in
+            pixelCount + max(0, representation.pixelsWide) * max(0, representation.pixelsHigh)
         }
-
-        let path = fileURL.standardizedFileURL.resolvingSymlinksInPath().path(percentEncoded: false)
-        let width = max(1, Int(targetSize.width.rounded(.up)))
-        let height = max(1, Int(targetSize.height.rounded(.up)))
-        return "\(purpose.rawValue):\(width)x\(height):\(path)"
+        let pixelCount = max(requestedPixelCount, representationPixelCount)
+        return max(1, pixelCount * 4)
     }
 }
 
@@ -349,7 +423,7 @@ enum CaptureThumbnailPreviewPresentation {
 }
 
 private struct PreviewVideoPlayerView: View {
-    let url: URL
+    let source: CaptureThumbnailPreparedSource
     let width: CGFloat
     let height: CGFloat
     let autoplays: Bool
@@ -365,12 +439,12 @@ private struct PreviewVideoPlayerView: View {
             }
         }
         .frame(width: width, height: height)
-        .task(id: url.path(percentEncoded: false)) {
+        .task(id: source.canonicalPath) {
             let activePlayer: AVPlayer
-            if let player, (player.currentItem?.asset as? AVURLAsset)?.url == url {
+            if let player, (player.currentItem?.asset as? AVURLAsset)?.url == source.fileURL {
                 activePlayer = player
             } else {
-                let newPlayer = AVPlayer(url: url)
+                let newPlayer = AVPlayer(url: source.fileURL)
                 player = newPlayer
                 activePlayer = newPlayer
             }

@@ -9,6 +9,7 @@ struct CaptureListView: View {
     let onClearSidecars: () -> Void
 
     @State private var sortOrder: [KeyPathComparator<CaptureRowPresentation>] = []
+    @State private var sortedRows: [CaptureRowPresentation] = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,12 +25,12 @@ struct CaptureListView: View {
             } else {
                 CaptureTableView(
                     store: store,
-                    rows: sortedCaptureRows,
+                    rows: sortedRows,
                     tableSelection: $tableSelection,
                     inspectedUnknownFolderID: $inspectedUnknownFolderID,
                     fileActions: fileActions,
                     onDeleteCapturesFromSource: onDeleteCapturesFromSource,
-                    sortOrder: $sortOrder
+                    sortOrder: sortOrderBinding
                 )
             }
 
@@ -94,6 +95,9 @@ struct CaptureListView: View {
                 .padding(16)
             }
         }
+        .onChange(of: store.captureRows, initial: true) { _, rows in
+            refreshSortedRows(from: rows, sortOrder: sortOrder)
+        }
     }
 
     private var header: some View {
@@ -132,17 +136,31 @@ struct CaptureListView: View {
         .padding(.vertical, 14)
     }
 
-    private var sortedCaptureRows: [CaptureRowPresentation] {
+    private var sortOrderBinding: Binding<[KeyPathComparator<CaptureRowPresentation>]> {
+        Binding(
+            get: { sortOrder },
+            set: { newSortOrder in
+                sortOrder = newSortOrder
+                refreshSortedRows(from: store.captureRows, sortOrder: newSortOrder)
+            }
+        )
+    }
+
+    private func refreshSortedRows(
+        from rows: [CaptureRowPresentation],
+        sortOrder: [KeyPathComparator<CaptureRowPresentation>]
+    ) {
         guard !sortOrder.isEmpty else {
-            return store.captureRows
+            sortedRows = rows
+            return
         }
 
-        return store.captureRows.sorted(using: sortOrder + [KeyPathComparator(\.captureSortValue)])
+        sortedRows = rows.sorted(using: sortOrder + [KeyPathComparator(\.captureSortValue)])
     }
 
     private var headerSubtitle: String {
-        let selectedCount = store.selectedCaptureIDs.count
-        let captureCount = store.captures.count
+        let selectedCount = store.selectedCaptureCount
+        let captureCount = store.captureIDs.count
         let suffix = selectedCount == 1 ? "marked" : "marked"
         return "\(captureCount) captures · \(selectedCount) \(suffix) for import"
     }
@@ -226,13 +244,19 @@ private struct CaptureTableView: View {
                             isMarkedForImport: store.isCaptureSelected(id: item.id),
                             deleteSelectionCount: deletionIDs.count,
                             onOpen: {
-                                fileActions.open(item.capture)
+                                if let capture = store.capture(withID: item.id) {
+                                    fileActions.open(capture)
+                                }
                             },
                             onRevealInFinder: {
-                                fileActions.revealInFinder(item.capture)
+                                if let capture = store.capture(withID: item.id) {
+                                    fileActions.revealInFinder(capture)
+                                }
                             },
                             onCopyFilePath: {
-                                fileActions.copyFilePath(item.capture)
+                                if let capture = store.capture(withID: item.id) {
+                                    fileActions.copyFilePath(capture)
+                                }
                             },
                             onToggleImportMark: {
                                 store.setCaptureSelected(
@@ -296,17 +320,17 @@ private struct CaptureContextMenu: View {
         Button(action: onOpen) {
             Label("Open", systemImage: "arrow.up.forward.app")
         }
-        .disabled(row.capture.fileActionURL == nil)
+        .disabled(!row.canOpen)
 
         Button(action: onRevealInFinder) {
             Label("Reveal in Finder", systemImage: "folder")
         }
-        .disabled(row.capture.finderSelectionURLs.isEmpty)
+        .disabled(!row.canRevealInFinder)
 
         Button(action: onCopyFilePath) {
             Label("Copy File Path", systemImage: "doc.on.doc")
         }
-        .disabled(row.capture.fileActionURL == nil)
+        .disabled(!row.canCopyFilePath)
 
         Divider()
 

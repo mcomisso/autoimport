@@ -2,24 +2,86 @@ import Foundation
 import Observation
 
 struct CaptureRowPresentation: Identifiable, Hashable, Sendable {
-    let capture: LogicalCapture
+    let id: String
+    let displayName: String
     let duplicateState: CaptureDuplicateState
     let kindText: String
     let timestampText: String
     let sizeText: String
     let statusText: String
     let detailTexts: [String]
+    let thumbnailFileURL: URL?
+    let previewFileURL: URL?
+    let canOpen: Bool
+    let canRevealInFinder: Bool
+    let canCopyFilePath: Bool
+    let captureSortValue: String
+    let kindSortValue: String
+    let modificationDateSortValue: Date
+    let sizeSortValue: Int64
+    let statusSortValue: String
 
     init(capture: LogicalCapture, duplicateState: CaptureDuplicateState) {
         self.init(
-            capture: capture,
+            id: capture.id,
+            displayName: capture.displayName,
             duplicateState: duplicateState,
             kindText: Self.kindText(for: capture),
             timestampText: CaptureDisplayFormatter.timestamp(capture.primaryAsset?.modificationDate) ?? "-",
             sizeText: CaptureDisplayFormatter.fileSize(capture.totalSize),
             statusText: Self.statusText(for: capture, duplicateState: duplicateState),
-            detailTexts: Self.detailTexts(for: capture)
+            detailTexts: Self.detailTexts(for: capture),
+            thumbnailFileURL: capture.preferredThumbnailAsset?.fileURL,
+            previewFileURL: capture.preferredPreviewAsset?.fileURL,
+            canOpen: capture.fileActionURL != nil,
+            canRevealInFinder: !capture.finderSelectionURLs.isEmpty,
+            canCopyFilePath: capture.fileActionURL != nil,
+            captureSortValue: Self.normalizedSortValue(capture.displayName),
+            kindSortValue: Self.normalizedSortValue(Self.kindText(for: capture)),
+            modificationDateSortValue: capture.primaryAsset?.modificationDate ?? .distantPast,
+            sizeSortValue: capture.totalSize,
+            statusSortValue: Self.normalizedSortValue(Self.statusText(for: capture, duplicateState: duplicateState))
         )
+    }
+
+    init(
+        id: String,
+        displayName: String,
+        duplicateState: CaptureDuplicateState,
+        kindText: String,
+        timestampText: String,
+        sizeText: String,
+        statusText: String,
+        detailTexts: [String],
+        thumbnailFileURL: URL? = nil,
+        previewFileURL: URL? = nil,
+        canOpen: Bool = false,
+        canRevealInFinder: Bool = false,
+        canCopyFilePath: Bool = false,
+        captureSortValue: String? = nil,
+        kindSortValue: String? = nil,
+        modificationDateSortValue: Date = .distantPast,
+        sizeSortValue: Int64 = 0,
+        statusSortValue: String? = nil
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.duplicateState = duplicateState
+        self.kindText = kindText
+        self.timestampText = timestampText
+        self.sizeText = sizeText
+        self.statusText = statusText
+        self.detailTexts = detailTexts
+        self.thumbnailFileURL = thumbnailFileURL
+        self.previewFileURL = previewFileURL
+        self.canOpen = canOpen
+        self.canRevealInFinder = canRevealInFinder
+        self.canCopyFilePath = canCopyFilePath
+        self.captureSortValue = captureSortValue ?? Self.normalizedSortValue(displayName)
+        self.kindSortValue = kindSortValue ?? Self.normalizedSortValue(kindText)
+        self.modificationDateSortValue = modificationDateSortValue
+        self.sizeSortValue = sizeSortValue
+        self.statusSortValue = statusSortValue ?? Self.normalizedSortValue(statusText)
     }
 
     init(
@@ -31,37 +93,23 @@ struct CaptureRowPresentation: Identifiable, Hashable, Sendable {
         statusText: String,
         detailTexts: [String]
     ) {
-        self.capture = capture
-        self.duplicateState = duplicateState
-        self.kindText = kindText
-        self.timestampText = timestampText
-        self.sizeText = sizeText
-        self.statusText = statusText
-        self.detailTexts = detailTexts
-    }
-
-    var id: String {
-        capture.id
-    }
-
-    var captureSortValue: String {
-        normalizedSortValue(capture.displayName)
-    }
-
-    var kindSortValue: String {
-        normalizedSortValue(kindText)
-    }
-
-    var modificationDateSortValue: Date {
-        capture.primaryAsset?.modificationDate ?? .distantPast
-    }
-
-    var sizeSortValue: Int64 {
-        capture.totalSize
-    }
-
-    var statusSortValue: String {
-        normalizedSortValue(statusText)
+        self.init(
+            id: capture.id,
+            displayName: capture.displayName,
+            duplicateState: duplicateState,
+            kindText: kindText,
+            timestampText: timestampText,
+            sizeText: sizeText,
+            statusText: statusText,
+            detailTexts: detailTexts,
+            thumbnailFileURL: capture.preferredThumbnailAsset?.fileURL,
+            previewFileURL: capture.preferredPreviewAsset?.fileURL,
+            canOpen: capture.fileActionURL != nil,
+            canRevealInFinder: !capture.finderSelectionURLs.isEmpty,
+            canCopyFilePath: capture.fileActionURL != nil,
+            modificationDateSortValue: capture.primaryAsset?.modificationDate ?? .distantPast,
+            sizeSortValue: capture.totalSize
+        )
     }
 
     var isDuplicate: Bool {
@@ -116,7 +164,7 @@ struct CaptureRowPresentation: Identifiable, Hashable, Sendable {
         return texts
     }
 
-    private func normalizedSortValue(_ value: String) -> String {
+    private static func normalizedSortValue(_ value: String) -> String {
         value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 }
@@ -128,6 +176,48 @@ private struct AutomaticImportAttemptKey: Hashable, Sendable {
     let captureIDs: [String]
 }
 
+private struct CaptureCacheSnapshot: Sendable {
+    let captures: [LogicalCapture]
+    let captureIDs: [String]
+    let captureByID: [String: LogicalCapture]
+    let captureSizeByID: [String: Int64]
+    let sidecarFilesInSelectedSource: [SourceAssetFile]
+    let captureRows: [CaptureRowPresentation]
+
+    init(
+        captures: [LogicalCapture],
+        duplicateStatesByCaptureID: [String: CaptureDuplicateState]
+    ) {
+        self.captures = captures
+        self.captureIDs = captures.map(\.id)
+        self.captureByID = Dictionary(captures.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        self.captureSizeByID = Dictionary(captures.map { ($0.id, $0.totalSize) }, uniquingKeysWith: { first, _ in first })
+        self.sidecarFilesInSelectedSource = captures
+            .flatMap(\.memberFiles)
+            .filter(\.isHelperFile)
+            .sorted { $0.relativePath < $1.relativePath }
+        self.captureRows = captures.map { capture in
+            CaptureRowPresentation(
+                capture: capture,
+                duplicateState: duplicateStatesByCaptureID[capture.id] ?? .unique
+            )
+        }
+    }
+}
+
+private struct LoadedSourceSnapshot: Sendable {
+    let captureCache: CaptureCacheSnapshot
+    let unknownFolders: [UnknownFolder]
+
+    init(grouping: CaptureGroupingResult) {
+        self.captureCache = CaptureCacheSnapshot(
+            captures: grouping.captures,
+            duplicateStatesByCaptureID: [:]
+        )
+        self.unknownFolders = grouping.unknownFolders
+    }
+}
+
 @MainActor
 @Observable
 final class AppStore {
@@ -136,7 +226,7 @@ final class AppStore {
     typealias GroupAssetsAction = @Sendable ([SourceAssetFile]) -> CaptureGroupingResult
     typealias DuplicateStateResolver = @Sendable ([LogicalCapture], URL, DestinationOrganizationMode, String) async -> [String: CaptureDuplicateState]
     typealias ImportProgressHandler = @Sendable (ImportProgress) -> Void
-    typealias ImportCapturesAction = @Sendable ([LogicalCapture], URL, DestinationOrganizationMode, String, Bool, @escaping ImportProgressHandler) async -> ImportSessionResult
+    typealias ImportCapturesAction = @Sendable ([LogicalCapture], URL, DestinationOrganizationMode, String, Bool, @escaping ImportProgressHandler) throws -> ImportSessionResult
     typealias DeleteCaptureFilesAction = @Sendable ([LogicalCapture]) async -> Void
     typealias DeleteSourceFilesAction = @Sendable ([SourceAssetFile]) async -> Void
     typealias EjectSourceAction = @Sendable (SourceDevice) async throws -> Void
@@ -161,9 +251,12 @@ final class AppStore {
     private var duplicateStatesAreResolved = false
     private var automaticImportTask: Task<Void, Never>?
     private var lastAutomaticImportAttemptKey: AutomaticImportAttemptKey?
+    private var importWorkerTask: Task<ImportSessionResult, Never>?
+    private var importGeneration = 0
     private var destinationCapacityTask: Task<Void, Never>?
     private var destinationCapacityGeneration = 0
     private var sourceEjectionTask: Task<Void, Never>?
+    private var isApplyingCaptureCacheSnapshot = false
 
     @ObservationIgnored private var captureByID: [String: LogicalCapture] = [:]
     @ObservationIgnored private var captureSizeByID: [String: Int64] = [:]
@@ -173,18 +266,21 @@ final class AppStore {
     var selectedSource: SourceDevice?
     var captures: [LogicalCapture] = [] {
         didSet {
+            guard !isApplyingCaptureCacheSnapshot else {
+                return
+            }
+
             rebuildCaptureCaches()
         }
     }
     private(set) var captureIDs: [String] = []
     private(set) var captureRows: [CaptureRowPresentation] = []
     var unknownFolders: [UnknownFolder] = []
-    var selectedCaptureIDs: [String] = [] {
-        didSet {
-            rebuildSelectionCaches()
-        }
-    }
+    private(set) var selectedCaptureIDs: [String] = []
+    private(set) var selectedCaptureCount = 0
     private(set) var selectedCapturesTotalSize: Int64 = 0
+    private(set) var selectedDuplicateCaptureCount = 0
+    private(set) var selectedPartialDuplicateCaptureCount = 0
     private(set) var sidecarFilesInSelectedSource: [SourceAssetFile] = []
     var pendingDeletionCaptureIDs: [String] = []
     var showUnknownFolders = false
@@ -257,25 +353,14 @@ final class AppStore {
             return results
         },
         importCapturesAction: @escaping ImportCapturesAction = { captures, destinationURL, organizationMode, cameraName, overwriteDuplicates, onProgress in
-            await Task.detached {
-                (try? ImportCoordinator().importCaptures(
-                    captures,
-                    destinationRoot: destinationURL,
-                    organizationMode: organizationMode,
-                    cameraName: cameraName,
-                    overwriteDuplicates: overwriteDuplicates,
-                    onProgress: onProgress
-                )) ?? ImportSessionResult(
-                    captureResults: captures.map {
-                        CaptureImportResult(
-                            captureID: $0.id,
-                            status: .failed,
-                            importedURLs: [],
-                            isDeleteEligible: false
-                        )
-                    }
-                )
-            }.value
+            try ImportCoordinator().importCaptures(
+                captures,
+                destinationRoot: destinationURL,
+                organizationMode: organizationMode,
+                cameraName: cameraName,
+                overwriteDuplicates: overwriteDuplicates,
+                onProgress: onProgress
+            )
         },
         deleteCaptureFilesAction: @escaping DeleteCaptureFilesAction = { captures in
             SourceDeletionService().delete(captures)
@@ -317,24 +402,24 @@ final class AppStore {
         selectedCaptures.filter { duplicateState(for: $0) == .partial }
     }
 
+    var hasDuplicateCapturesInSelection: Bool {
+        selectedDuplicateCaptureCount > 0
+    }
+
     var visibleUnknownFolders: [UnknownFolder] {
         showUnknownFolders ? unknownFolders : []
     }
 
     var canImportSelection: Bool {
-        destinationAvailability.isReachable && !selectedCaptures.isEmpty && !isImporting
+        destinationAvailability.isReachable && selectedCaptureCount > 0 && !isImporting
     }
 
     var canImportAllCaptures: Bool {
-        destinationAvailability.isReachable && !captures.isEmpty && !isImporting
+        destinationAvailability.isReachable && !captureIDs.isEmpty && !isImporting
     }
 
     var areAllCapturesSelected: Bool {
-        guard !captureIDs.isEmpty else {
-            return false
-        }
-
-        return Set(captureIDs).isSubset(of: selectedCaptureIDSet)
+        !captureIDs.isEmpty && selectedCaptureCount == captureIDs.count
     }
 
     var canSelectAllCaptures: Bool {
@@ -342,7 +427,7 @@ final class AppStore {
     }
 
     var canDeselectAllCaptures: Bool {
-        !isImporting && !selectedCaptureIDs.isEmpty
+        !isImporting && selectedCaptureCount > 0
     }
 
     var canClearSidecarFiles: Bool {
@@ -380,7 +465,10 @@ final class AppStore {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
-    func refreshSources() {
+    func refreshSources(
+        selectFirstIfNeeded: Bool = true,
+        fallbackToFirstWhenSelectedUnavailable: Bool = true
+    ) {
         let volumeSources = discoverVolumeSources()
         let imageCaptureSources = discoverImageCaptureSources()
         let combined = mergeSources(volumeSources: volumeSources, imageCaptureSources: imageCaptureSources, folderSources: folderSources)
@@ -388,18 +476,21 @@ final class AppStore {
         sources = combined
 
         guard let selectedSource else {
-            self.selectedSource = combined.first
+            self.selectedSource = selectFirstIfNeeded ? combined.first : nil
             return
         }
 
         self.selectedSource = combined.first(where: { $0.id == selectedSource.id })
             ?? combined.first(where: { normalizedName($0.displayName) == normalizedName(selectedSource.displayName) })
-            ?? combined.first
+            ?? (fallbackToFirstWhenSelectedUnavailable ? combined.first : nil)
     }
 
     func refreshSourcesAndLoadPreferredSource(preferNewDetectedMedia: Bool = false) {
         let previousSourceIDs = Set(sources.map(\.id))
-        refreshSources()
+        refreshSources(
+            selectFirstIfNeeded: false,
+            fallbackToFirstWhenSelectedUnavailable: false
+        )
 
         let newDetectedMedia = sources.first { source in
             preferNewDetectedMedia
@@ -407,7 +498,7 @@ final class AppStore {
                 && !previousSourceIDs.contains(source.id)
                 && isAutomaticImportSource(source)
         }
-        let sourceToLoad = newDetectedMedia ?? selectedSource ?? sources.first
+        let sourceToLoad = newDetectedMedia ?? selectedSource
 
         if let sourceToLoad {
             loadSource(sourceToLoad)
@@ -419,18 +510,21 @@ final class AppStore {
     func loadSource(_ source: SourceDevice) {
         sourceLoadingTask?.cancel()
         sourceLoadingGeneration += 1
+        duplicateDetectionTask?.cancel()
+        duplicateDetectionGeneration += 1
+        cancelActiveImport(resetProgress: true)
+        lastAutomaticImportAttemptKey = nil
         let generation = sourceLoadingGeneration
 
         selectedSource = source
         isLoadingSource = true
-        captures = []
+        applyCaptureCacheSnapshot(CaptureCacheSnapshot(captures: [], duplicateStatesByCaptureID: [:]))
         unknownFolders = []
         pendingDeletionCaptureIDs = []
         lastImportResult = nil
-        selectedCaptureIDs = []
+        replaceSelectedCaptureIDs([])
         duplicateStatesByCaptureID = [:]
         duplicateStatesAreResolved = false
-        refreshCaptureRows()
 
         let scanSource = scanSource
         let groupAssets = groupAssets
@@ -442,7 +536,10 @@ final class AppStore {
             let grouping = groupAssets(scannedFiles)
             guard !Task.isCancelled else { return }
 
-            await self?.applyLoadedSource(grouping, generation: generation)
+            let snapshot = LoadedSourceSnapshot(grouping: grouping)
+            guard !Task.isCancelled else { return }
+
+            await self?.applyLoadedSource(snapshot, generation: generation)
         }
     }
 
@@ -480,23 +577,23 @@ final class AppStore {
     }
 
     func setCaptureSelected(id: String, isSelected: Bool) {
-        if isSelected {
-            guard !selectedCaptureIDSet.contains(id) else {
-                return
-            }
+        guard captureByID[id] != nil else {
+            return
+        }
 
-            selectedCaptureIDs.append(id)
+        if isSelected {
+            appendSelectedCaptureID(id)
         } else {
-            selectedCaptureIDs.removeAll { $0 == id }
+            removeSelectedCaptureID(id)
         }
     }
 
     func selectAllCaptures() {
-        selectedCaptureIDs = captures.map(\.id)
+        replaceSelectedCaptureIDs(captureIDs)
     }
 
     func clearCaptureSelection() {
-        selectedCaptureIDs.removeAll()
+        replaceSelectedCaptureIDs([])
     }
 
     func toggleMarks(for ids: Set<String>) {
@@ -505,12 +602,26 @@ final class AppStore {
         let allAlreadyMarked = ids.isSubset(of: selectedCaptureIDSet)
 
         if allAlreadyMarked {
-            selectedCaptureIDs.removeAll { ids.contains($0) }
+            replaceSelectedCaptureIDs(selectedCaptureIDs.filter { !ids.contains($0) })
         } else {
             let missing = ids.subtracting(selectedCaptureIDSet)
-            let additions = captures.map(\.id).filter { missing.contains($0) }
-            selectedCaptureIDs.append(contentsOf: additions)
+            let additions = captureIDs.filter { missing.contains($0) }
+            appendSelectedCaptureIDs(additions)
         }
+    }
+
+    func replaceSelectedCaptureIDs(_ ids: [String]) {
+        var seenIDs = Set<String>()
+        var filteredIDs: [String] = []
+        filteredIDs.reserveCapacity(ids.count)
+
+        for id in ids where captureByID[id] != nil && seenIDs.insert(id).inserted {
+            filteredIDs.append(id)
+        }
+
+        selectedCaptureIDs = filteredIDs
+        selectedCaptureIDSet = seenIDs
+        rebuildSelectionTotals()
     }
 
     func dismissPendingDeletion() {
@@ -684,16 +795,16 @@ final class AppStore {
         duplicateDetectionTask?.cancel()
         duplicateDetectionGeneration += 1
         duplicateStatesAreResolved = false
+        cancelActiveImport(resetProgress: true)
 
         selectedSource = nil
         isLoadingSource = false
-        captures = []
+        applyCaptureCacheSnapshot(CaptureCacheSnapshot(captures: [], duplicateStatesByCaptureID: [:]))
         unknownFolders = []
         pendingDeletionCaptureIDs = []
         lastImportResult = nil
-        selectedCaptureIDs = []
+        replaceSelectedCaptureIDs([])
         duplicateStatesByCaptureID = [:]
-        refreshCaptureRows()
     }
 
     private func finishSourceEjection(
@@ -721,18 +832,18 @@ final class AppStore {
     }
 
     private func applyLoadedSource(
-        _ grouping: CaptureGroupingResult,
+        _ snapshot: LoadedSourceSnapshot,
         generation: Int
     ) {
         guard generation == sourceLoadingGeneration else {
             return
         }
 
-        captures = grouping.captures
-        unknownFolders = grouping.unknownFolders
+        applyCaptureCacheSnapshot(snapshot.captureCache)
+        unknownFolders = snapshot.unknownFolders
         pendingDeletionCaptureIDs = []
         lastImportResult = nil
-        selectedCaptureIDs = captures.map(\.id)
+        replaceSelectedCaptureIDs(snapshot.captureCache.captureIDs)
         isLoadingSource = false
 
         refreshDuplicateStates(preselectNonDuplicates: true)
@@ -746,9 +857,10 @@ final class AppStore {
 
         guard let destinationURL, destinationAvailability.isReachable else {
             duplicateStatesByCaptureID = [:]
-            refreshCaptureRows()
+            refreshCaptureRows(with: [:])
+            rebuildSelectionTotals()
             if preselectNonDuplicates {
-                selectedCaptureIDs = captures.map(\.id)
+                replaceSelectedCaptureIDs(captureIDs)
             }
             return
         }
@@ -761,8 +873,15 @@ final class AppStore {
         duplicateDetectionTask = Task.detached { [weak self] in
             let states = await resolver(capturesSnapshot, destinationURL, organizationMode, cameraName)
             if Task.isCancelled { return }
+            let rows = capturesSnapshot.map { capture in
+                CaptureRowPresentation(
+                    capture: capture,
+                    duplicateState: states[capture.id] ?? .unique
+                )
+            }
             await self?.applyDuplicateStates(
                 states,
+                rows: rows,
                 for: capturesSnapshot,
                 generation: generation,
                 preselectNonDuplicates: preselectNonDuplicates
@@ -772,6 +891,7 @@ final class AppStore {
 
     private func applyDuplicateStates(
         _ states: [String: CaptureDuplicateState],
+        rows: [CaptureRowPresentation],
         for capturesSnapshot: [LogicalCapture],
         generation: Int,
         preselectNonDuplicates: Bool
@@ -782,11 +902,12 @@ final class AppStore {
 
         duplicateStatesByCaptureID = states
         duplicateStatesAreResolved = true
-        refreshCaptureRows()
+        captureRows = rows
+        rebuildSelectionTotals()
         if preselectNonDuplicates {
-            selectedCaptureIDs = capturesSnapshot
+            replaceSelectedCaptureIDs(capturesSnapshot
                 .filter { (states[$0.id] ?? .unique) != .duplicate }
-                .map(\.id)
+                .map(\.id))
         }
         scheduleAutomaticImportIfNeeded(
             capturesSnapshot: capturesSnapshot,
@@ -869,6 +990,8 @@ final class AppStore {
         let cameraName = source?.displayName ?? "Imports"
         let mode = organizationMode
         let action = importCapturesAction
+        importGeneration += 1
+        let generation = importGeneration
 
         isImporting = true
         importProgress = ImportProgress(
@@ -881,26 +1004,68 @@ final class AppStore {
             ),
             currentCaptureName: capturesSnapshot.first?.displayName
         )
-        defer {
-            isImporting = false
-            importProgress = nil
-        }
 
         let progressHandler: ImportProgressHandler = { [weak self] progress in
             Task { @MainActor [weak self] in
-                self?.importProgress = progress
+                guard
+                    let self,
+                    generation == self.importGeneration,
+                    self.isImporting
+                else {
+                    return
+                }
+
+                self.importProgress = progress
             }
         }
 
-        let result = await action(
-            capturesSnapshot,
-            destinationURL,
-            mode,
-            cameraName,
-            overwriteDuplicates,
-            progressHandler
-        )
+        let worker = Task.detached(priority: .userInitiated) {
+            do {
+                return try action(
+                    capturesSnapshot,
+                    destinationURL,
+                    mode,
+                    cameraName,
+                    overwriteDuplicates,
+                    progressHandler
+                )
+            } catch {
+                return ImportSessionResult(
+                    captureResults: capturesSnapshot.map { capture in
+                        CaptureImportResult(
+                            captureID: capture.id,
+                            status: .failed,
+                            importedURLs: [],
+                            isDeleteEligible: false
+                        )
+                    }
+                )
+            }
+        }
+        importWorkerTask = worker
 
+        let result = await withTaskCancellationHandler {
+            await worker.value
+        } onCancel: {
+            worker.cancel()
+        }
+
+        guard !Task.isCancelled else {
+            if generation == importGeneration {
+                importWorkerTask = nil
+                isImporting = false
+                importProgress = nil
+            }
+            return
+        }
+
+        guard generation == importGeneration else {
+            return
+        }
+
+        importWorkerTask = nil
+        isImporting = false
+        importProgress = nil
         lastImportResult = result
         pendingDeletionCaptureIDs = result.captureResults
             .filter(\.isDeleteEligible)
@@ -938,31 +1103,101 @@ final class AppStore {
         destinationCapacity = capacity
     }
 
-    private func rebuildCaptureCaches() {
-        captureIDs = captures.map(\.id)
-        captureByID = Dictionary(captures.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        captureSizeByID = Dictionary(captures.map { ($0.id, $0.totalSize) }, uniquingKeysWith: { first, _ in first })
-        sidecarFilesInSelectedSource = captures
-            .flatMap(\.memberFiles)
-            .filter(\.isHelperFile)
-            .sorted { $0.relativePath < $1.relativePath }
-        rebuildSelectionCaches()
-        refreshCaptureRows()
-    }
+    private func cancelActiveImport(resetProgress: Bool) {
+        automaticImportTask?.cancel()
+        automaticImportTask = nil
+        importWorkerTask?.cancel()
+        importWorkerTask = nil
+        importGeneration += 1
 
-    private func rebuildSelectionCaches() {
-        selectedCaptureIDSet = Set(selectedCaptureIDs)
-        selectedCapturesTotalSize = selectedCaptureIDs.reduce(Int64(0)) { total, captureID in
-            total + (captureSizeByID[captureID] ?? 0)
+        if resetProgress {
+            isImporting = false
+            importProgress = nil
         }
     }
 
-    private func refreshCaptureRows() {
+    private func applyCaptureCacheSnapshot(_ snapshot: CaptureCacheSnapshot) {
+        isApplyingCaptureCacheSnapshot = true
+        captures = snapshot.captures
+        isApplyingCaptureCacheSnapshot = false
+        captureIDs = snapshot.captureIDs
+        captureByID = snapshot.captureByID
+        captureSizeByID = snapshot.captureSizeByID
+        sidecarFilesInSelectedSource = snapshot.sidecarFilesInSelectedSource
+        captureRows = snapshot.captureRows
+        replaceSelectedCaptureIDs(selectedCaptureIDs)
+    }
+
+    private func rebuildCaptureCaches() {
+        let snapshot = CaptureCacheSnapshot(
+            captures: captures,
+            duplicateStatesByCaptureID: duplicateStatesByCaptureID
+        )
+        applyCaptureCacheSnapshot(snapshot)
+    }
+
+    private func appendSelectedCaptureIDs(_ ids: [String]) {
+        for id in ids {
+            appendSelectedCaptureID(id)
+        }
+    }
+
+    private func appendSelectedCaptureID(_ id: String) {
+        guard captureByID[id] != nil, selectedCaptureIDSet.insert(id).inserted else {
+            return
+        }
+
+        selectedCaptureIDs.append(id)
+        selectedCaptureCount += 1
+        selectedCapturesTotalSize += captureSizeByID[id] ?? 0
+        incrementSelectedDuplicateCounts(for: duplicateStateForCaptureID(id), by: 1)
+    }
+
+    private func removeSelectedCaptureID(_ id: String) {
+        guard selectedCaptureIDSet.remove(id) != nil else {
+            return
+        }
+
+        selectedCaptureIDs.removeAll { $0 == id }
+        selectedCaptureCount = max(0, selectedCaptureCount - 1)
+        selectedCapturesTotalSize -= captureSizeByID[id] ?? 0
+        incrementSelectedDuplicateCounts(for: duplicateStateForCaptureID(id), by: -1)
+    }
+
+    private func rebuildSelectionTotals() {
+        selectedCaptureCount = selectedCaptureIDs.count
+        selectedCapturesTotalSize = selectedCaptureIDs.reduce(Int64(0)) { total, captureID in
+            total + (captureSizeByID[captureID] ?? 0)
+        }
+        selectedDuplicateCaptureCount = 0
+        selectedPartialDuplicateCaptureCount = 0
+        for captureID in selectedCaptureIDs {
+            incrementSelectedDuplicateCounts(for: duplicateStateForCaptureID(captureID), by: 1)
+        }
+    }
+
+    private func incrementSelectedDuplicateCounts(for state: CaptureDuplicateState, by delta: Int) {
+        switch state {
+        case .duplicate:
+            selectedDuplicateCaptureCount = max(0, selectedDuplicateCaptureCount + delta)
+        case .partial:
+            selectedPartialDuplicateCaptureCount = max(0, selectedPartialDuplicateCaptureCount + delta)
+        case .unique:
+            break
+        }
+    }
+
+    private func duplicateStateForCaptureID(_ id: String) -> CaptureDuplicateState {
+        duplicateStatesByCaptureID[id] ?? .unique
+    }
+
+    private func refreshCaptureRows(with states: [String: CaptureDuplicateState]? = nil) {
+        let states = states ?? duplicateStatesByCaptureID
         captureRows = captures.map { capture in
             let duplicateState = duplicateState(for: capture)
             return CaptureRowPresentation(
                 capture: capture,
-                duplicateState: duplicateState
+                duplicateState: states[capture.id] ?? duplicateState
             )
         }
     }

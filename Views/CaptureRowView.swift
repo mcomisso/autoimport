@@ -11,13 +11,13 @@ struct CaptureRowView: View {
             .labelsHidden()
 
             CaptureThumbnailView(
-                thumbnailFileURL: row.capture.preferredThumbnailAsset?.fileURL,
-                previewFileURL: row.capture.preferredPreviewAsset?.fileURL
+                thumbnailFileURL: row.thumbnailFileURL,
+                previewFileURL: row.previewFileURL
             )
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    Text(row.capture.displayName)
+                    Text(row.displayName)
                         .fontWeight(.medium)
                         .lineLimit(1)
 

@@ -25,6 +25,30 @@ struct VolumeSourceScannerTests {
     }
 
     @Test
+    func samplesUnknownFilesWithoutDroppingRecognizedMedia() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        try writeFile(named: "DCIM/100MEDIA/CLIP_0001.MP4", under: rootURL)
+        try writeFile(named: "MISC/one.tmp", under: rootURL)
+        try writeFile(named: "MISC/two.tmp", under: rootURL)
+        try writeFile(named: "MISC/three.tmp", under: rootURL)
+
+        let scanner = VolumeSourceScanner(
+            configuration: VolumeSourceScanner.Configuration(maximumUnknownFileCount: 1)
+        )
+
+        let files = try scanner.scan(sourceID: "camera", rootURL: rootURL)
+
+        #expect(files.map(\.relativePath) == [
+            "DCIM/100MEDIA/CLIP_0001.MP4",
+            "MISC/one.tmp",
+        ])
+        #expect(files.filter { !$0.classification.isRecognizedCaptureMember }.count == 1)
+    }
+
+    @Test
     func sourceDeletionServiceDeletesOnlyProvidedSidecarFiles() throws {
         let rootURL = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)

@@ -8,6 +8,12 @@ struct UserPreferences {
         static let automaticallyImportDetectedMedia = "automaticallyImportDetectedMedia"
     }
 
+    private enum Default {
+        static let organizationMode = DestinationOrganizationMode.flat
+        static let showHelperFiles = false
+        static let automaticallyImportDetectedMedia = false
+    }
+
     private let userDefaults: UserDefaults
 
     init(userDefaults: UserDefaults = .standard) {
@@ -35,7 +41,7 @@ struct UserPreferences {
             let rawValue = userDefaults.string(forKey: Key.organizationMode),
             let mode = DestinationOrganizationMode(rawValue: rawValue)
         else {
-            return .flat
+            return Default.organizationMode
         }
 
         return mode
@@ -46,7 +52,7 @@ struct UserPreferences {
     }
 
     func showHelperFiles() -> Bool {
-        userDefaults.bool(forKey: Key.showHelperFiles)
+        bool(forKey: Key.showHelperFiles, defaultValue: Default.showHelperFiles)
     }
 
     func saveShowHelperFiles(_ showHelperFiles: Bool) {
@@ -54,10 +60,21 @@ struct UserPreferences {
     }
 
     func automaticallyImportDetectedMedia() -> Bool {
-        userDefaults.bool(forKey: Key.automaticallyImportDetectedMedia)
+        bool(
+            forKey: Key.automaticallyImportDetectedMedia,
+            defaultValue: Default.automaticallyImportDetectedMedia
+        )
     }
 
     func saveAutomaticallyImportDetectedMedia(_ automaticallyImportDetectedMedia: Bool) {
         userDefaults.set(automaticallyImportDetectedMedia, forKey: Key.automaticallyImportDetectedMedia)
+    }
+
+    private func bool(forKey key: String, defaultValue: Bool) -> Bool {
+        guard userDefaults.object(forKey: key) != nil else {
+            return defaultValue
+        }
+
+        return userDefaults.bool(forKey: key)
     }
 }

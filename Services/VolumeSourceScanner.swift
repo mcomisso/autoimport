@@ -1,15 +1,26 @@
 import Foundation
 
 struct VolumeSourceScanner {
+    struct Configuration: Sendable {
+        var maximumUnknownFileCount: Int
+
+        init(maximumUnknownFileCount: Int = 512) {
+            self.maximumUnknownFileCount = max(0, maximumUnknownFileCount)
+        }
+    }
+
     private let fileManager: FileManager
     private let directoryFilter: DirectoryFilter
+    private let configuration: Configuration
 
     init(
         fileManager: FileManager = .default,
-        directoryFilter: DirectoryFilter = DirectoryFilter()
+        directoryFilter: DirectoryFilter = DirectoryFilter(),
+        configuration: Configuration = Configuration()
     ) {
         self.fileManager = fileManager
         self.directoryFilter = directoryFilter
+        self.configuration = configuration
     }
 
     func scan(sourceID: String, rootURL: URL) throws -> [SourceAssetFile] {
@@ -30,8 +41,10 @@ struct VolumeSourceScanner {
         }
 
         var files: [SourceAssetFile] = []
+        var unknownFileCount = 0
 
         for case let fileURL as URL in enumerator {
+            try Task.checkCancellation()
             let values = try fileURL.resourceValues(forKeys: resourceKeys)
 
             if values.isDirectory == true {
@@ -45,6 +58,14 @@ struct VolumeSourceScanner {
                 continue
             }
 
+            let classification = MediaClassification.classify(pathExtension: fileURL.pathExtension)
+            if !classification.isRecognizedCaptureMember {
+                unknownFileCount += 1
+                guard unknownFileCount <= configuration.maximumUnknownFileCount else {
+                    continue
+                }
+            }
+
             files.append(
                 SourceAssetFile(
                     sourceID: sourceID,
@@ -52,7 +73,7 @@ struct VolumeSourceScanner {
                     fileURL: fileURL,
                     fileSize: Int64(values.fileSize ?? 0),
                     modificationDate: values.contentModificationDate ?? .distantPast,
-                    classification: .classify(pathExtension: fileURL.pathExtension),
+                    classification: classification,
                     duration: nil,
                     pixelSize: nil
                 )
