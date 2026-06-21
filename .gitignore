@@ -40,3 +40,9 @@ playground.xcworkspace
 # Package.resolved
 .build
 .codex/*DerivedData*
+
+# Local release credentials
+fastlane/.env
+fastlane/README.md
+fastlane/report.xml
+fastlane/test_output/

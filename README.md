@@ -35,6 +35,12 @@ AutoImport is intentionally focused on local ingest. It does not keep a persiste
 
 The app is distributed outside the Mac App Store and is not sandboxed, matching its removable-media workflow. Release builds use hardened runtime and Developer ID notarization.
 
+AutoImport uses Sparkle for app updates. The appcast feed is expected at:
+
+https://raw.githubusercontent.com/mcomisso/autoimport/main/appcast.xml
+
+Sparkle update signing uses the `AutoImport` EdDSA key in the login Keychain. The private key must be backed up because future updates need to be signed by the same key.
+
 ## Build From Source
 
 Requirements:
@@ -67,6 +73,12 @@ Verify that the app builds and launches:
 ./script/build_and_run.sh --verify
 ```
 
+Release a new signed, notarized GitHub version:
+
+```bash
+fastlane mac release version:0.1.4
+```
+
 ## Project Layout
 
 - `App/` - app entry point
@@ -82,4 +94,3 @@ Verify that the app builds and launches:
 The initial public release is `v0.1.0`:
 
 https://github.com/mcomisso/autoimport/releases/tag/v0.1.0
-

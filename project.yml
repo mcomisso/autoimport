@@ -11,6 +11,10 @@ settings:
     MARKETING_VERSION: 0.1.3
     DEVELOPMENT_TEAM: 382G4857JD
     CODE_SIGN_STYLE: Automatic
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.9.3
 targets:
   AutoImport:
     type: application
@@ -22,13 +26,25 @@ targets:
       - path: Stores
       - path: Services
       - path: Support
+    dependencies:
+      - package: Sparkle
+        product: Sparkle
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: AutoImport
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        LSApplicationCategoryType: public.app-category.photography
+        NSPrincipalClass: NSApplication
+        SUFeedURL: https://raw.githubusercontent.com/mcomisso/autoimport/main/appcast.xml
+        SUPublicEDKey: mklx990y+GuDiC6jXVj8qWoFd0H2LJHi76UGuu/P3Pw=
+        SUEnableAutomaticChecks: true
+        SUAllowsAutomaticUpdates: true
     settings:
       base:
         PRODUCT_NAME: AutoImport
         GENERATE_INFOPLIST_FILE: true
-        INFOPLIST_KEY_CFBundleDisplayName: AutoImport
-        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.photography
-        INFOPLIST_KEY_NSPrincipalClass: NSApplication
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_HARDENED_RUNTIME: YES
         ENABLE_APP_SANDBOX: NO
