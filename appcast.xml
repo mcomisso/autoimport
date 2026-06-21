@@ -1,0 +1,14 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>AutoImport</title>
+        <item>
+            <title>0.1.4</title>
+            <pubDate>Sun, 21 Jun 2026 12:14:46 +0100</pubDate>
+            <sparkle:version>5</sparkle:version>
+            <sparkle:shortVersionString>0.1.4</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/mcomisso/autoimport/releases/download/v0.1.4/AutoImport-0.1.4.dmg" length="5055037" type="application/octet-stream" sparkle:edSignature="HvT6XaPV9t/OZ+tj7lUTWqPzyUo/ZL0e3G8aceXRr3mVY92uhQHN/6DYVo76QWles/5XHDiiT+NMxjn/AguxBw=="/>
+        </item>
+    </channel>
+</rss>
