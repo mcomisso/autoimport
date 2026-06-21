@@ -21,7 +21,7 @@ struct InspectorView: View {
                     InspectorEmptyStateView()
                 }
             }
-            .padding(24)
+            .padding(20)
         }
         .navigationTitle("Inspector")
     }
@@ -31,10 +31,23 @@ private struct CaptureInspectorContent: View {
     let capture: LogicalCapture
     let duplicateState: CaptureDuplicateState?
     @Binding var showHelperFiles: Bool
+    private let memberFilesSnapshot: CaptureInspectorMemberFilesSnapshot
+
+    init(
+        capture: LogicalCapture,
+        duplicateState: CaptureDuplicateState?,
+        showHelperFiles: Binding<Bool>
+    ) {
+        self.capture = capture
+        self.duplicateState = duplicateState
+        _showHelperFiles = showHelperFiles
+        memberFilesSnapshot = CaptureInspectorMemberFilesSnapshot(
+            capture: capture,
+            showHelperFiles: showHelperFiles.wrappedValue
+        )
+    }
 
     var body: some View {
-        let visibleMemberFiles = capture.visibleMemberFiles(showHelperFiles: showHelperFiles)
-
         VStack(alignment: .leading, spacing: 18) {
             CapturePreviewSection(
                 thumbnailFileURL: capture.preferredThumbnailAsset?.fileURL,
@@ -42,15 +55,54 @@ private struct CaptureInspectorContent: View {
             )
 
             CaptureTitleSection(capture: capture, duplicateState: duplicateState)
-            CaptureSummarySection(capture: capture, visibleMemberFiles: visibleMemberFiles, showHelperFiles: showHelperFiles)
+            CaptureSummarySection(
+                capture: capture,
+                memberCountText: memberFilesSnapshot.memberCountText
+            )
             CaptureMetadataSection(sourceAsset: capture.preferredMetadataAsset)
 
             Toggle("Show helper files", isOn: $showHelperFiles)
                 .toggleStyle(.switch)
 
-            MemberFilesSection(files: visibleMemberFiles)
+            MemberFilesSection(files: memberFilesSnapshot.visibleFiles)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct CaptureInspectorMemberFilesSnapshot: Equatable {
+    let visibleFiles: [SourceAssetFile]
+    let totalFileCount: Int
+    let helperFileCount: Int
+
+    init(capture: LogicalCapture, showHelperFiles: Bool) {
+        var nonHelperFiles: [SourceAssetFile] = []
+        var helperFileCount = 0
+
+        for file in capture.memberFiles {
+            if file.isHelperFile {
+                helperFileCount += 1
+            } else {
+                nonHelperFiles.append(file)
+            }
+        }
+
+        visibleFiles = if showHelperFiles || nonHelperFiles.isEmpty {
+            capture.memberFiles
+        } else {
+            nonHelperFiles
+        }
+        totalFileCount = capture.memberFiles.count
+        self.helperFileCount = helperFileCount
+    }
+
+    var memberCountText: String {
+        guard helperFileCount > 0, visibleFiles.count < totalFileCount else {
+            let fileLabel = totalFileCount == 1 ? "file" : "files"
+            return "\(totalFileCount) \(fileLabel)"
+        }
+
+        return "\(visibleFiles.count) shown · \(totalFileCount) total"
     }
 }
 
@@ -59,10 +111,17 @@ private struct CapturePreviewSection: View {
     let previewFileURL: URL?
 
     var body: some View {
+        ViewThatFits(in: .horizontal) {
+            preview(size: CGSize(width: 320, height: 196))
+            preview(size: CGSize(width: 280, height: 172))
+        }
+    }
+
+    private func preview(size: CGSize) -> some View {
         CaptureThumbnailView(
             thumbnailFileURL: thumbnailFileURL,
             previewFileURL: previewFileURL,
-            size: CGSize(width: 320, height: 196),
+            size: size,
             cornerRadius: 14,
             previewPresentation: .inlinePlayableVideo
         )
@@ -90,8 +149,7 @@ private struct CaptureTitleSection: View {
 
 private struct CaptureSummarySection: View {
     let capture: LogicalCapture
-    let visibleMemberFiles: [SourceAssetFile]
-    let showHelperFiles: Bool
+    let memberCountText: String
 
     var body: some View {
         GroupBox {
@@ -106,16 +164,6 @@ private struct CaptureSummarySection: View {
         } label: {
             Text("Summary")
         }
-    }
-
-    private var memberCountText: String {
-        let helperFileCount = capture.helperFiles.count
-        guard helperFileCount > 0, !showHelperFiles else {
-            let fileLabel = capture.memberFiles.count == 1 ? "file" : "files"
-            return "\(capture.memberFiles.count) \(fileLabel)"
-        }
-
-        return "\(visibleMemberFiles.count) shown · \(capture.memberFiles.count) total"
     }
 
     private var kindText: String {
@@ -300,7 +348,7 @@ private struct MemberFilesSection: View {
 
     var body: some View {
         GroupBox {
-            VStack(alignment: .leading, spacing: 10) {
+            LazyVStack(alignment: .leading, spacing: 10) {
                 ForEach(files) { file in
                     MemberFileRow(file: file)
                 }
@@ -375,7 +423,7 @@ private struct UnknownFolderInspectorContent: View {
             }
 
             GroupBox {
-                VStack(alignment: .leading, spacing: 10) {
+                LazyVStack(alignment: .leading, spacing: 10) {
                     ForEach(unknownFolder.files) { file in
                         HStack {
                             Text(file.fileName)
@@ -395,6 +443,13 @@ private struct UnknownFolderInspectorContent: View {
 
 private struct UnknownFolderPreview: View {
     var body: some View {
+        ViewThatFits(in: .horizontal) {
+            preview(size: CGSize(width: 320, height: 196))
+            preview(size: CGSize(width: 280, height: 172))
+        }
+    }
+
+    private func preview(size: CGSize) -> some View {
         RoundedRectangle(cornerRadius: 14, style: .continuous)
             .fill(.quaternary)
             .overlay {
@@ -402,7 +457,7 @@ private struct UnknownFolderPreview: View {
                     .font(.system(size: 58))
                     .foregroundStyle(.secondary)
             }
-            .frame(width: 320, height: 196)
+            .frame(width: size.width, height: size.height)
     }
 }
 

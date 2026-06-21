@@ -254,6 +254,7 @@ struct ImportCoordinator {
         }
 
         while true {
+            try Task.checkCancellation()
             guard let data = try sourceHandle.read(upToCount: Self.copyChunkSize), !data.isEmpty else {
                 break
             }
@@ -332,12 +333,15 @@ private enum ImportRollbackAction {
 }
 
 private struct ImportProgressReporter {
+    private static let minimumChunkProgressByteDelta: Int64 = 32 * 1024 * 1024
+
     let totalCaptures: Int
     let totalBytes: Int64
     let onProgress: @Sendable (ImportProgress) -> Void
 
     private var completedCaptures = 0
     private var completedBytes: Int64 = 0
+    private var lastEmittedCompletedBytes: Int64?
     private var currentCaptureStartBytes: Int64 = 0
     private var currentCaptureExpectedBytes: Int64 = 0
     private var currentCaptureName: String?
@@ -354,14 +358,14 @@ private struct ImportProgressReporter {
 
     mutating func start(firstCaptureName: String?) {
         currentCaptureName = firstCaptureName
-        emit()
+        emit(force: true)
     }
 
     mutating func beginCapture(_ capture: LogicalCapture, expectedCopiedBytes: Int64) {
         currentCaptureStartBytes = completedBytes
         currentCaptureExpectedBytes = expectedCopiedBytes
         currentCaptureName = capture.displayName
-        emit()
+        emit(force: true)
     }
 
     mutating func advanceCompletedBytes(by byteCount: Int64) {
@@ -370,23 +374,44 @@ private struct ImportProgressReporter {
         }
 
         completedBytes = min(totalBytes, completedBytes + byteCount)
-        emit()
+        emit(force: shouldEmitChunkProgress())
     }
 
     mutating func finishCapture() {
         completedCaptures = min(totalCaptures, completedCaptures + 1)
         completedBytes = min(totalBytes, max(completedBytes, currentCaptureStartBytes + currentCaptureExpectedBytes))
-        emit()
+        emit(force: true)
     }
 
     mutating func finishAll() {
         completedCaptures = totalCaptures
         completedBytes = totalBytes
         currentCaptureName = nil
-        emit()
+        emit(force: true)
     }
 
-    private func emit() {
+    private func shouldEmitChunkProgress() -> Bool {
+        guard completedBytes > 0 else {
+            return false
+        }
+
+        guard let lastEmittedCompletedBytes else {
+            return true
+        }
+
+        if lastEmittedCompletedBytes == 0 {
+            return true
+        }
+
+        return completedBytes - lastEmittedCompletedBytes >= Self.minimumChunkProgressByteDelta
+    }
+
+    private mutating func emit(force: Bool = false) {
+        guard force || shouldEmitChunkProgress() else {
+            return
+        }
+
+        lastEmittedCompletedBytes = completedBytes
         onProgress(ImportProgress(
             completedCaptures: completedCaptures,
             totalCaptures: totalCaptures,

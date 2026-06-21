@@ -2,19 +2,22 @@ import Foundation
 
 struct CaptureGrouper {
     func group(_ files: [SourceAssetFile]) -> CaptureGroupingResult {
-        let sortedFiles = files.sorted {
-            ($0.relativePath, $0.classification.rawValue) < ($1.relativePath, $1.classification.rawValue)
+        var unknownFilesByFolder: [String: [SourceAssetFile]] = [:]
+        var recognizedFilesByGroupingKey: [String: [SourceAssetFile]] = [:]
+
+        for file in files {
+            if file.classification.isRecognizedCaptureMember {
+                recognizedFilesByGroupingKey[makeGroupingKey(for: file), default: []].append(file)
+            } else {
+                unknownFilesByFolder[file.relativeDirectoryPath, default: []].append(file)
+            }
         }
 
-        let unknownFolders = Dictionary(grouping: sortedFiles.filter { !$0.classification.isRecognizedCaptureMember }) { file in
-            file.relativeDirectoryPath
-        }
-        .map { UnknownFolder(relativeFolderPath: $0.key, files: $0.value.sorted(by: byRelativePath)) }
+        let unknownFolders = unknownFilesByFolder
+            .map { UnknownFolder(relativeFolderPath: $0.key, files: $0.value.sorted(by: byRelativePath)) }
         .sorted { $0.relativeFolderPath < $1.relativeFolderPath }
 
-        let groupedRecognizedFiles = Dictionary(grouping: sortedFiles.filter(\.classification.isRecognizedCaptureMember), by: makeGroupingKey)
-
-        let captures = groupedRecognizedFiles
+        let captures = recognizedFilesByGroupingKey
             .map { key, group in
                 makeCapture(groupingKey: key, files: group.sorted(by: byRelativePath))
             }
@@ -38,13 +41,14 @@ struct CaptureGrouper {
         let displayName = groupingKey.components(separatedBy: "::").last ?? groupingKey
         let multipartSegments = files.filter { multipartFamilyStem(for: $0.fileStem) != nil && $0.classification.isPrimaryCandidate }
         let orderedMultipartSegments = multipartSegments.sorted(by: multipartOrder)
+        let multipartSegmentIDs = Set(orderedMultipartSegments.map(\.id))
 
         let primaryAsset = orderedMultipartSegments.first
             ?? files.first(where: \.classification.isPrimaryCandidate)
             ?? files.first
 
         let companionFiles = files.filter { file in
-            if orderedMultipartSegments.contains(file) {
+            if multipartSegmentIDs.contains(file.id) {
                 return false
             }
 

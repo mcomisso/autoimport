@@ -290,12 +290,7 @@ enum CaptureMetadataReader {
             return ISO8601DateFormatter().string(from: date)
         }
 
-        guard let value = try? await metadataItem.load(.value) else {
-            return nil
-        }
-
-        let valueString = String(describing: value).trimmingCharacters(in: .whitespacesAndNewlines)
-        return valueString.isEmpty ? nil : valueString
+        return nil
     }
 
     private static func dictionaryValue(for key: CFString, in dictionary: [String: Any]) -> [String: Any] {

@@ -38,6 +38,7 @@ struct ContentView: View {
                 onRefresh: { refreshSources() },
                 onAddFolder: chooseSourceFolder
             )
+            .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 280)
         } detail: {
             VStack(spacing: 0) {
                 CaptureListView(
@@ -76,7 +77,7 @@ struct ContentView: View {
                     set: { store.showHelperFiles = $0 }
                 )
             )
-            .inspectorColumnWidth(min: 368, ideal: 420, max: 560)
+            .inspectorColumnWidth(min: 320, ideal: 380, max: 520)
         }
         .toolbar {
             Button {
@@ -143,7 +144,7 @@ struct ContentView: View {
 
         importAllRequested = importAll
 
-        if !store.duplicateCapturesInSelection.isEmpty {
+        if store.hasDuplicateCapturesInSelection {
             showingOverwriteConfirmation = true
         } else {
             Task {
