@@ -675,13 +675,15 @@ final class AppStore {
 
         let pendingIDs = Set(pendingDeletionCaptureIDs)
         let deletableCaptures = captures.filter { pendingIDs.contains($0.id) }
+        guard !deletableCaptures.isEmpty else {
+            pendingDeletionCaptureIDs = []
+            return
+        }
+
         let action = deleteCaptureFilesAction
         await action(deletableCaptures)
-        pendingDeletionCaptureIDs = []
 
-        if let selectedSource {
-            loadSource(selectedSource)
-        }
+        removeCapturesFromCurrentSnapshot(ids: Set(deletableCaptures.map(\.id)))
     }
 
     func canDeleteCaptureFromSource(id: String) -> Bool {
@@ -704,12 +706,8 @@ final class AppStore {
 
         let action = deleteCaptureFilesAction
         await action(capturesToDelete)
-        pendingDeletionCaptureIDs.removeAll { ids.contains($0) }
-        selectedCaptureIDs.removeAll { ids.contains($0) }
 
-        if let selectedSource {
-            loadSource(selectedSource)
-        }
+        removeCapturesFromCurrentSnapshot(ids: Set(capturesToDelete.map(\.id)))
     }
 
     func clearSidecarFilesFromSelectedSource() async {
@@ -1283,6 +1281,29 @@ final class AppStore {
             duplicateStatesByCaptureID: duplicateStatesByCaptureID
         )
         applyCaptureCacheSnapshot(snapshot)
+    }
+
+    private func removeCapturesFromCurrentSnapshot(ids: Set<String>) {
+        guard !ids.isEmpty else {
+            return
+        }
+
+        let remainingCaptures = captures.filter { !ids.contains($0.id) }
+        guard remainingCaptures.count != captures.count else {
+            return
+        }
+
+        pendingDeletionCaptureIDs.removeAll { ids.contains($0) }
+        for id in ids {
+            duplicateStatesByCaptureID.removeValue(forKey: id)
+        }
+
+        applyCaptureCacheSnapshot(
+            CaptureCacheSnapshot(
+                captures: remainingCaptures,
+                duplicateStatesByCaptureID: duplicateStatesByCaptureID
+            )
+        )
     }
 
     private func appendSelectedCaptureIDs(_ ids: [String]) {

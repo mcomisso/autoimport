@@ -788,10 +788,14 @@ struct AppStoreTests {
         )
 
         let deletedCaptureIDs = LockedTestValue<[String]>([])
+        let scanCount = LockedTestValue(0)
         let store = AppStore(
             discoverVolumeSources: { [source] },
             discoverImageCaptureSources: { [] },
-            scanSource: { _ in [] },
+            scanSource: { _ in
+                scanCount.update { $0 += 1 }
+                return []
+            },
             groupAssets: { _ in
                 CaptureGroupingResult(captures: [importedCapture, failedCapture], unknownFolders: [])
             },
@@ -830,6 +834,10 @@ struct AppStoreTests {
 
         #expect(deletedCaptureIDs.get() == ["imported"])
         #expect(store.pendingDeletionCaptureIDs.isEmpty)
+        #expect(store.captureIDs == ["failed"])
+        #expect(store.captureRows.map(\.id) == ["failed"])
+        #expect(store.selectedCaptureIDs == ["failed"])
+        #expect(scanCount.get() == 1)
     }
 
     @Test
@@ -923,7 +931,7 @@ struct AppStoreTests {
     }
 
     @Test
-    func deleteCapturesFromSourceDeletesRequestedCaptureMembersAndReloads() async {
+    func deleteCapturesFromSourceRemovesRequestedCaptureMembersWithoutReloading() async {
         let source = SourceDevice(
             id: "volume",
             displayName: "DJI Camera",
@@ -972,14 +980,17 @@ struct AppStoreTests {
         await store.awaitSourceLoading()
 
         await store.deleteCapturesFromSource(ids: ["clip-a", "missing"])
-        await store.awaitSourceLoading()
 
         #expect(deletedCaptureIDs.get() == ["clip-a"])
         #expect(deletedRelativePaths.get() == [
             "DCIM/100MEDIA/CLIP_A.MP4",
             "DCIM/100MEDIA/CLIP_A.THM",
         ])
-        #expect(scanCount.get() == 2)
+        #expect(store.captureIDs == ["clip-b"])
+        #expect(store.captureRows.map(\.id) == ["clip-b"])
+        #expect(store.selectedCaptureIDs == ["clip-b"])
+        #expect(store.capture(withID: "clip-a") == nil)
+        #expect(scanCount.get() == 1)
     }
 
     @Test
