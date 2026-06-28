@@ -32,6 +32,10 @@ struct CaptureMetadataItem: Identifiable, Hashable, Sendable {
 }
 
 enum CaptureMetadataReader {
+    private static let approximateAssetOptions = [
+        AVURLAssetPreferPreciseDurationAndTimingKey: false
+    ]
+
     static func metadata(for fileURL: URL) async -> CaptureMetadata {
         if let imageMetadata = imageMetadata(for: fileURL) {
             return imageMetadata
@@ -119,7 +123,7 @@ enum CaptureMetadataReader {
     }
 
     private static func videoMetadata(for fileURL: URL) async -> CaptureMetadata {
-        let asset = AVURLAsset(url: fileURL)
+        let asset = AVURLAsset(url: fileURL, options: approximateAssetOptions)
 
         do {
             let metadataItems = try await asset.load(.metadata)

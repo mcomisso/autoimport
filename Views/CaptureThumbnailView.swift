@@ -82,7 +82,6 @@ private actor CaptureThumbnailPreviewCache {
     private var images: [Key: CachedCaptureImage] = [:]
     private var recentlyUsedKeys: [Key] = []
     private var totalByteCount = 0
-    private var inFlightLoads: [Key: Task<CachedCaptureImage?, Never>] = [:]
 
     func image(for key: Key, load: @escaping @Sendable () async -> CachedCaptureImage?) async -> CachedCaptureImage? {
         if let cachedImage = images[key] {
@@ -90,19 +89,13 @@ private actor CaptureThumbnailPreviewCache {
             return cachedImage
         }
 
-        if let inFlightLoad = inFlightLoads[key] {
-            return await inFlightLoad.value
-        }
-
-        let loadTask = Task.detached(priority: .userInitiated) {
-            await load()
-        }
-        inFlightLoads[key] = loadTask
-
-        let loadedImage = await loadTask.value
-        inFlightLoads[key] = nil
+        let loadedImage = await load()
 
         if let loadedImage {
+            guard loadedImage.estimatedByteCount <= maximumTotalByteCount else {
+                return nil
+            }
+
             store(loadedImage, for: key)
         }
 
@@ -123,7 +116,6 @@ private actor CaptureThumbnailPreviewCache {
             if let removedImage = images.removeValue(forKey: keyToRemove) {
                 totalByteCount -= removedImage.estimatedByteCount
             }
-            inFlightLoads[keyToRemove] = nil
         }
     }
 
@@ -135,6 +127,81 @@ private actor CaptureThumbnailPreviewCache {
     private func markRecentlyUsed(_ key: Key) {
         recentlyUsedKeys.removeAll { $0 == key }
         recentlyUsedKeys.append(key)
+    }
+}
+
+private actor CaptureMediaProcessingLimiter {
+    private let maximumThumbnailWork = 3
+    private let maximumVideoWork = 1
+    private var activeThumbnailWork = 0
+    private var activeVideoWork = 0
+    private var thumbnailWaiters: [CheckedContinuation<Void, Never>] = []
+    private var videoWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func perform<T: Sendable>(
+        kind: MediaProcessingActivityKind,
+        operation: @escaping @Sendable () async -> T
+    ) async -> T {
+        await acquire(kind: kind)
+        defer {
+            release(kind: kind)
+        }
+
+        return await operation()
+    }
+
+    private func acquire(kind: MediaProcessingActivityKind) async {
+        if kind.isVideoWork {
+            await acquireVideoWork()
+        } else {
+            await acquireThumbnailWork()
+        }
+    }
+
+    private func release(kind: MediaProcessingActivityKind) {
+        if kind.isVideoWork {
+            releaseVideoWork()
+        } else {
+            releaseThumbnailWork()
+        }
+    }
+
+    private func acquireThumbnailWork() async {
+        guard activeThumbnailWork >= maximumThumbnailWork else {
+            activeThumbnailWork += 1
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            thumbnailWaiters.append(continuation)
+        }
+    }
+
+    private func acquireVideoWork() async {
+        guard activeVideoWork >= maximumVideoWork else {
+            activeVideoWork += 1
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            videoWaiters.append(continuation)
+        }
+    }
+
+    private func releaseThumbnailWork() {
+        if thumbnailWaiters.isEmpty {
+            activeThumbnailWork = max(0, activeThumbnailWork - 1)
+        } else {
+            thumbnailWaiters.removeFirst().resume()
+        }
+    }
+
+    private func releaseVideoWork() {
+        if videoWaiters.isEmpty {
+            activeVideoWork = max(0, activeVideoWork - 1)
+        } else {
+            videoWaiters.removeFirst().resume()
+        }
     }
 }
 
@@ -178,6 +245,10 @@ struct CaptureThumbnailView: View {
     @State private var player: AVPlayer?
 
     private static let imageCache = CaptureThumbnailPreviewCache()
+    private static let mediaProcessingLimiter = CaptureMediaProcessingLimiter()
+    nonisolated private static let approximateAssetOptions = [
+        AVURLAssetPreferPreciseDurationAndTimingKey: false
+    ]
 
     init(
         thumbnailFileURL: URL?,
@@ -411,31 +482,34 @@ struct CaptureThumbnailView: View {
         )
 
         let cachedImage = await imageCache.image(for: key) {
-            let activityID = await mediaProcessingTracker?.begin(
-                kind: processingActivityKind(for: source, purpose: purpose),
-                fileName: source.fileURL.lastPathComponent
-            )
+            let processingKind = processingActivityKind(for: source, purpose: purpose)
 
-            let loadedImage: CachedCaptureImage?
-            guard !Task.isCancelled else {
+            return await mediaProcessingLimiter.perform(kind: processingKind) {
+                let activityID = await mediaProcessingTracker?.begin(
+                    kind: processingKind,
+                    fileName: source.fileURL.lastPathComponent
+                )
+
+                guard !Task.isCancelled else {
+                    await mediaProcessingTracker?.finish(activityID)
+                    return nil
+                }
+
+                if let quickLookImage = await quickLookImage(for: source, key: key) {
+                    await mediaProcessingTracker?.finish(activityID)
+                    return quickLookImage
+                }
+
+                let videoFrameImage = await videoFrameImage(for: source, key: key)
                 await mediaProcessingTracker?.finish(activityID)
-                return nil
+                return videoFrameImage
             }
-
-            if let quickLookImage = await quickLookImage(for: source, key: key) {
-                loadedImage = quickLookImage
-            } else {
-                loadedImage = await videoFrameImage(for: source, key: key)
-            }
-
-            await mediaProcessingTracker?.finish(activityID)
-            return loadedImage
         }
 
         return cachedImage?.image
     }
 
-    private static func processingActivityKind(
+    nonisolated private static func processingActivityKind(
         for source: CaptureThumbnailPreparedSource,
         purpose: CaptureThumbnailPreviewCache.Purpose
     ) -> MediaProcessingActivityKind {
@@ -449,7 +523,7 @@ struct CaptureThumbnailView: View {
         }
     }
 
-    private static func quickLookImage(
+    nonisolated private static func quickLookImage(
         for source: CaptureThumbnailPreparedSource,
         key: CaptureThumbnailPreviewCache.Key
     ) async -> CachedCaptureImage? {
@@ -480,7 +554,7 @@ struct CaptureThumbnailView: View {
         )
     }
 
-    private static func videoFrameImage(
+    nonisolated private static func videoFrameImage(
         for source: CaptureThumbnailPreparedSource,
         key: CaptureThumbnailPreviewCache.Key
     ) async -> CachedCaptureImage? {
@@ -496,14 +570,14 @@ struct CaptureThumbnailView: View {
             CaptureVideoPreviewURLFactory.removeTemporaryURL(previewURL.temporaryURL)
         }
 
-        let asset = AVURLAsset(url: previewURL.url)
+        let asset = AVURLAsset(url: previewURL.url, options: approximateAssetOptions)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(
             width: CGFloat(key.pointWidth) * CGFloat(key.displayScale),
             height: CGFloat(key.pointHeight) * CGFloat(key.displayScale)
         )
-        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.75, preferredTimescale: 600)
         generator.requestedTimeToleranceAfter = CMTime(seconds: 0.75, preferredTimescale: 600)
 
         do {
@@ -530,7 +604,7 @@ struct CaptureThumbnailView: View {
         }
     }
 
-    private static func videoFrameTime(for asset: AVURLAsset) async -> CMTime {
+    nonisolated private static func videoFrameTime(for asset: AVURLAsset) async -> CMTime {
         guard
             let duration = try? await asset.load(.duration),
             duration.isNumeric,
@@ -546,7 +620,7 @@ struct CaptureThumbnailView: View {
         )
     }
 
-    private static func estimatedByteCount(for image: NSImage, key: CaptureThumbnailPreviewCache.Key) -> Int {
+    nonisolated private static func estimatedByteCount(for image: NSImage, key: CaptureThumbnailPreviewCache.Key) -> Int {
         let requestedPixelCount = max(1, key.pointWidth)
             * max(1, key.pointHeight)
             * max(1, Int(key.displayScale.rounded(.up)))

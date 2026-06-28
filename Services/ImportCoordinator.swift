@@ -255,12 +255,21 @@ struct ImportCoordinator {
 
         while true {
             try Task.checkCancellation()
-            guard let data = try sourceHandle.read(upToCount: Self.copyChunkSize), !data.isEmpty else {
+
+            let copiedByteCount = try autoreleasepool {
+                guard let data = try sourceHandle.read(upToCount: Self.copyChunkSize), !data.isEmpty else {
+                    return 0
+                }
+
+                try destinationHandle.write(contentsOf: data)
+                return data.count
+            }
+
+            guard copiedByteCount > 0 else {
                 break
             }
 
-            try destinationHandle.write(contentsOf: data)
-            onCopiedBytes(Int64(data.count))
+            onCopiedBytes(Int64(copiedByteCount))
         }
     }
 
