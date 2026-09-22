@@ -189,6 +189,170 @@ struct ImportCoordinatorTests {
         #expect(FileManager.default.fileExists(atPath: sandbox.destinationURL.appending(path: "CLIP_0007.MP4").path(percentEncoded: false)))
     }
 
+    @Test
+    func planReservesNamesAcrossCapturesAndExecutionUsesPlannedURLs() throws {
+        let sandbox = try makeSandbox()
+        defer { try? FileManager.default.removeItem(at: sandbox.rootURL) }
+
+        let firstURL = try sandbox.writeSourceFile(named: "CameraA/CLIP_0010.MP4", data: Data("first".utf8))
+        let secondURL = try sandbox.writeSourceFile(named: "CameraB/CLIP_0010.MP4", data: Data("second".utf8))
+        let captures = [makeSingleFileCapture(fileURL: firstURL), makeSingleFileCapture(fileURL: secondURL)]
+        let coordinator = ImportCoordinator()
+
+        let plan = try coordinator.planCaptures(
+            captures,
+            destinationRoot: sandbox.destinationURL,
+            organizationMode: .flat,
+            cameraName: "Camera",
+            overwriteDuplicates: false
+        )
+
+        #expect(plan.totalBytes == captures.reduce(Int64(0)) { $0 + $1.totalSize })
+        #expect(plan.captures[0].files[0].action == .copy)
+        #expect(plan.captures[1].files[0].action == .rename)
+        #expect(plan.captures[0].files[0].destinationURL.lastPathComponent == "CLIP_0010.MP4")
+        #expect(plan.captures[1].files[0].destinationURL.lastPathComponent == "CLIP_0010 2.MP4")
+
+        let result = coordinator.importCaptures(plan)
+
+        #expect(result.captureResults.map(\.status) == [.imported, .imported])
+        #expect(result.captureResults[0].importedURLs == plan.captures[0].files.map(\.destinationURL))
+        #expect(result.captureResults[1].importedURLs == plan.captures[1].files.map(\.destinationURL))
+        #expect(try Data(contentsOf: plan.captures[0].files[0].destinationURL) == Data("first".utf8))
+        #expect(try Data(contentsOf: plan.captures[1].files[0].destinationURL) == Data("second".utf8))
+    }
+
+    @Test(arguments: [false, true])
+    func overwritePlanPreservesBothCapturesWithTheSameFilename(destinationInitiallyExists: Bool) throws {
+        let sandbox = try makeSandbox()
+        defer { try? FileManager.default.removeItem(at: sandbox.rootURL) }
+
+        let firstData = Data("first capture".utf8)
+        let secondData = Data("second capture".utf8)
+        let firstURL = try sandbox.writeSourceFile(named: "CameraA/CLIP_0015.MP4", data: firstData)
+        let secondURL = try sandbox.writeSourceFile(named: "CameraB/CLIP_0015.MP4", data: secondData)
+        if destinationInitiallyExists {
+            _ = try sandbox.writeDestinationFile(named: "CLIP_0015.MP4", data: Data("old capture".utf8))
+        }
+
+        let coordinator = ImportCoordinator()
+        let plan = try coordinator.planCaptures(
+            [makeSingleFileCapture(fileURL: firstURL), makeSingleFileCapture(fileURL: secondURL)],
+            destinationRoot: sandbox.destinationURL,
+            organizationMode: .flat,
+            cameraName: "Camera",
+            overwriteDuplicates: true
+        )
+
+        #expect(plan.captures[0].files[0].action == (destinationInitiallyExists ? .replace : .copy))
+        #expect(plan.captures[1].files[0].action == .rename)
+        #expect(plan.captures[0].files[0].destinationURL.lastPathComponent == "CLIP_0015.MP4")
+        #expect(plan.captures[1].files[0].destinationURL.lastPathComponent == "CLIP_0015 2.MP4")
+
+        let result = coordinator.importCaptures(plan)
+
+        #expect(result.captureResults.map(\.status) == [.imported, .imported])
+        #expect(result.captureResults.allSatisfy { $0.isDeleteEligible })
+        #expect(try Data(contentsOf: plan.captures[0].files[0].destinationURL) == firstData)
+        #expect(try Data(contentsOf: plan.captures[1].files[0].destinationURL) == secondData)
+    }
+
+    @Test
+    func executionDoesNotOverwriteDestinationCreatedAfterPlanning() throws {
+        let sandbox = try makeSandbox()
+        defer { try? FileManager.default.removeItem(at: sandbox.rootURL) }
+
+        let sourceURL = try sandbox.writeSourceFile(named: "Camera/CLIP_0011.MP4", data: Data("source".utf8))
+        let coordinator = ImportCoordinator()
+        let plan = try coordinator.planCaptures(
+            [makeSingleFileCapture(fileURL: sourceURL)],
+            destinationRoot: sandbox.destinationURL,
+            organizationMode: .flat,
+            cameraName: "Camera",
+            overwriteDuplicates: false
+        )
+        let destinationURL = plan.captures[0].files[0].destinationURL
+        let externalData = Data("external".utf8)
+        try externalData.write(to: destinationURL)
+
+        let result = coordinator.importCaptures(plan)
+
+        #expect(result.captureResults[0].status == .failed)
+        #expect(try Data(contentsOf: destinationURL) == externalData)
+    }
+
+    @Test
+    func planShowsDuplicateSkipAndExcludesItsBytes() throws {
+        let sandbox = try makeSandbox()
+        defer { try? FileManager.default.removeItem(at: sandbox.rootURL) }
+
+        let sourceURL = try sandbox.writeSourceFile(named: "Camera/CLIP_0012.MP4", data: Data("same".utf8))
+        _ = try sandbox.writeDestinationFile(named: "CLIP_0012.MP4", data: Data("same".utf8))
+        let capture = makeSingleFileCapture(fileURL: sourceURL)
+        let coordinator = ImportCoordinator()
+        let plan = try coordinator.planCaptures(
+            [capture],
+            destinationRoot: sandbox.destinationURL,
+            organizationMode: .flat,
+            cameraName: "Camera",
+            overwriteDuplicates: false
+        )
+
+        #expect(plan.captures[0].duplicateState == .duplicate)
+        #expect(plan.captures[0].skipsDuplicate)
+        #expect(plan.captures[0].files.isEmpty)
+        #expect(plan.totalBytes == 0)
+        #expect(coordinator.importCaptures(plan).captureResults[0].status == .skippedDuplicate)
+    }
+
+    @Test
+    func staleDuplicatePlanDoesNotReportSkippedAfterDestinationRemoval() throws {
+        let sandbox = try makeSandbox()
+        defer { try? FileManager.default.removeItem(at: sandbox.rootURL) }
+
+        let sourceURL = try sandbox.writeSourceFile(named: "Camera/CLIP_0013.MP4", data: Data("same".utf8))
+        let destinationURL = try sandbox.writeDestinationFile(named: "CLIP_0013.MP4", data: Data("same".utf8))
+        let coordinator = ImportCoordinator()
+        let plan = try coordinator.planCaptures(
+            [makeSingleFileCapture(fileURL: sourceURL)],
+            destinationRoot: sandbox.destinationURL,
+            organizationMode: .flat,
+            cameraName: "Camera",
+            overwriteDuplicates: false
+        )
+        try FileManager.default.removeItem(at: destinationURL)
+
+        let result = coordinator.importCaptures(plan)
+
+        #expect(result.captureResults[0].status == .failed)
+        #expect(!result.captureResults[0].isDeleteEligible)
+    }
+
+    @Test
+    func staleOverwritePlanPreservesChangedDestination() throws {
+        let sandbox = try makeSandbox()
+        defer { try? FileManager.default.removeItem(at: sandbox.rootURL) }
+
+        let sourceURL = try sandbox.writeSourceFile(named: "Camera/CLIP_0014.MP4", data: Data("source".utf8))
+        let destinationURL = try sandbox.writeDestinationFile(named: "CLIP_0014.MP4", data: Data("original".utf8))
+        let coordinator = ImportCoordinator()
+        let plan = try coordinator.planCaptures(
+            [makeSingleFileCapture(fileURL: sourceURL)],
+            destinationRoot: sandbox.destinationURL,
+            organizationMode: .flat,
+            cameraName: "Camera",
+            overwriteDuplicates: true
+        )
+        let changedData = Data("changed destination".utf8)
+        try changedData.write(to: destinationURL)
+
+        let result = coordinator.importCaptures(plan)
+
+        #expect(plan.captures[0].files[0].action == .replace)
+        #expect(result.captureResults[0].status == .failed)
+        #expect(try Data(contentsOf: destinationURL) == changedData)
+    }
+
     private func makeCapture(primaryURL: URL, sidecarURL: URL) -> LogicalCapture {
         let primaryAsset = makeAsset(primaryURL)
         let sidecarAsset = makeAsset(sidecarURL)

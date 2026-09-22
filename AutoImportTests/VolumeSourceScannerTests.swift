@@ -49,6 +49,58 @@ struct VolumeSourceScannerTests {
     }
 
     @Test
+    func skipsUnknownFilesAfterLimitAndStillTraversesDottedDirectories() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        try writeFile(named: "MISC/one.tmp", under: rootURL)
+        try writeFile(named: "MISC/two.tmp", under: rootURL)
+        try writeFile(named: "MISC/archive.tmp/PHOTO.JPG", under: rootURL)
+
+        let scanner = VolumeSourceScanner(
+            configuration: VolumeSourceScanner.Configuration(maximumUnknownFileCount: 0)
+        )
+        let files = try scanner.scan(sourceID: "camera", rootURL: rootURL)
+
+        #expect(files.map(\.relativePath) == ["MISC/archive.tmp/PHOTO.JPG"])
+    }
+
+    @Test
+    func reportsAnUnavailableRootInsteadOfReturningAnEmptyScan() {
+        let missingRoot = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+
+        #expect(throws: (any Error).self) {
+            try VolumeSourceScanner().scan(sourceID: "camera", rootURL: missingRoot)
+        }
+    }
+
+    @Test
+    func reportsAnEnumerationFailureInsteadOfPublishingPartialResults() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let unreadableURL = rootURL.appending(path: "DCIM", directoryHint: .isDirectory)
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: unreadableURL.path(percentEncoded: false)
+            )
+            try? FileManager.default.removeItem(at: rootURL)
+        }
+
+        try writeFile(named: "DCIM/PHOTO.JPG", under: rootURL)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0],
+            ofItemAtPath: unreadableURL.path(percentEncoded: false)
+        )
+
+        #expect(throws: (any Error).self) {
+            try VolumeSourceScanner().scan(sourceID: "camera", rootURL: rootURL)
+        }
+    }
+
+    @Test
     func sourceDeletionServiceDeletesOnlyProvidedSidecarFiles() throws {
         let rootURL = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)

@@ -24,20 +24,32 @@ struct VolumeSourceScanner {
     }
 
     func scan(sourceID: String, rootURL: URL) throws -> [SourceAssetFile] {
-        let resourceKeys: Set<URLResourceKey> = [
+        let typeKeys: Set<URLResourceKey> = [
             .isDirectoryKey,
             .isRegularFileKey,
+        ]
+        let metadataKeys: Set<URLResourceKey> = [
             .fileSizeKey,
             .contentModificationDateKey,
         ]
+        let allKeys = typeKeys.union(metadataKeys)
 
+        let rootType = try rootURL.resourceValues(forKeys: [.isDirectoryKey])
+        guard rootType.isDirectory == true else {
+            throw CocoaError(.fileReadUnknown)
+        }
+
+        var enumerationError: Error?
         guard let enumerator = fileManager.enumerator(
             at: rootURL,
-            includingPropertiesForKeys: Array(resourceKeys),
+            includingPropertiesForKeys: Array(typeKeys),
             options: [.skipsPackageDescendants],
-            errorHandler: { _, _ in true }
+            errorHandler: { _, error in
+                enumerationError = error
+                return false
+            }
         ) else {
-            return []
+            throw CocoaError(.fileReadUnknown)
         }
 
         var files: [SourceAssetFile] = []
@@ -46,7 +58,10 @@ struct VolumeSourceScanner {
 
         for case let fileURL as URL in enumerator {
             try Task.checkCancellation()
-            let values = try fileURL.resourceValues(forKeys: resourceKeys)
+            let classification = MediaClassification.classify(pathExtension: fileURL.pathExtension)
+            let values = try fileURL.resourceValues(
+                forKeys: classification.isRecognizedCaptureMember ? allKeys : typeKeys
+            )
 
             if values.isDirectory == true {
                 if directoryFilter.shouldSkipDirectory(named: fileURL.lastPathComponent) {
@@ -59,26 +74,33 @@ struct VolumeSourceScanner {
                 continue
             }
 
-            let classification = MediaClassification.classify(pathExtension: fileURL.pathExtension)
             if !classification.isRecognizedCaptureMember {
-                unknownFileCount += 1
-                guard unknownFileCount <= configuration.maximumUnknownFileCount else {
+                guard unknownFileCount < configuration.maximumUnknownFileCount else {
                     continue
                 }
+                unknownFileCount += 1
             }
+
+            let metadata = classification.isRecognizedCaptureMember
+                ? values
+                : try fileURL.resourceValues(forKeys: metadataKeys)
 
             files.append(
                 SourceAssetFile(
                     sourceID: sourceID,
                     relativePath: relativePath(for: fileURL, underStandardizedRootPath: standardizedRootPath),
                     fileURL: fileURL,
-                    fileSize: Int64(values.fileSize ?? 0),
-                    modificationDate: values.contentModificationDate ?? .distantPast,
+                    fileSize: Int64(metadata.fileSize ?? 0),
+                    modificationDate: metadata.contentModificationDate ?? .distantPast,
                     classification: classification,
                     duration: nil,
                     pixelSize: nil
                 )
             )
+        }
+
+        if let enumerationError {
+            throw enumerationError
         }
 
         return files.sorted { $0.relativePath < $1.relativePath }

@@ -24,7 +24,9 @@ Open the DMG, drag `AutoImport.app` to Applications, and launch it normally. The
 - Recursively scan mounted media while ignoring filesystem noise such as `.Trashes`, `.Spotlight-V100`, and `.fseventsd`.
 - Group related files into logical captures, including sidecars, proxies, and multipart clips.
 - Detect already imported captures against the selected destination using an in-memory fingerprint index.
+- Preview planned destinations, duplicate skips, and file conflicts before importing. The destination is checked again when import starts.
 - Import selected captures or all captures into flat, date-based, or camera/date destination layouts.
+- Report source scan failures instead of presenting them as an empty source.
 - Surface duplicate, partial duplicate, metadata, capacity, and import progress state in a native SwiftUI interface.
 - Offer source deletion only after a capture imported successfully in full.
 - Eject mounted source volumes from the sidebar when the source is idle.

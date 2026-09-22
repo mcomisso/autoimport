@@ -1,5 +1,38 @@
 import Foundation
 
+struct ImportPlan: Sendable {
+    let captures: [PlannedCaptureImport]
+    let totalBytes: Int64
+}
+
+struct PlannedCaptureImport: Sendable {
+    let capture: LogicalCapture
+    let duplicateState: CaptureDuplicateState
+    let destinationDirectory: URL
+    let files: [PlannedFileImport]
+    let skipsDuplicate: Bool
+    let duplicateFiles: [PlannedExistingFile]
+}
+
+struct PlannedFileImport: Sendable {
+    enum Action: Equatable, Sendable {
+        case copy
+        case rename
+        case replace
+    }
+
+    let source: SourceAssetFile
+    let destinationURL: URL
+    let action: Action
+    let existingFile: PlannedExistingFile?
+}
+
+struct PlannedExistingFile: Sendable {
+    let url: URL
+    let size: Int64
+    let modificationDate: Date?
+}
+
 struct ImportCoordinator {
     private static let copyChunkSize = 4 * 1024 * 1024
 
@@ -15,40 +48,132 @@ struct ImportCoordinator {
         organizationMode: DestinationOrganizationMode,
         cameraName: String,
         overwriteDuplicates: Bool,
+        duplicateIndex: DestinationFingerprintIndex? = nil,
         onProgress: @escaping @Sendable (ImportProgress) -> Void = { _ in }
     ) throws -> ImportSessionResult {
-        var results: [CaptureImportResult] = []
-        let duplicateIndex = try DestinationFingerprintIndex.buildForImportDestinations(
+        let plan = try planCaptures(
+            captures,
+            destinationRoot: destinationRoot,
+            organizationMode: organizationMode,
+            cameraName: cameraName,
+            overwriteDuplicates: overwriteDuplicates,
+            duplicateIndex: duplicateIndex
+        )
+        return importCaptures(plan, onProgress: onProgress)
+    }
+
+    func planCaptures(
+        _ captures: [LogicalCapture],
+        destinationRoot: URL,
+        organizationMode: DestinationOrganizationMode,
+        cameraName: String,
+        overwriteDuplicates: Bool,
+        duplicateIndex: DestinationFingerprintIndex? = nil
+    ) throws -> ImportPlan {
+        let index = try duplicateIndex ?? DestinationFingerprintIndex.buildForImportDestinations(
             captures: captures,
             destinationRoot: destinationRoot,
             organizationMode: organizationMode,
             cameraName: cameraName,
             fileManager: fileManager
         )
-
-        var progress = ImportProgressReporter(
-            totalCaptures: captures.count,
-            totalBytes: captures.reduce(Int64(0)) { totalBytes, capture in
-                if duplicateIndex.duplicateState(for: capture) == .duplicate && !overwriteDuplicates {
-                    return totalBytes
-                }
-
-                return totalBytes + capture.totalSize
-            },
-            onProgress: onProgress
-        )
-        progress.start(firstCaptureName: captures.first?.displayName)
+        var reservedPaths = Set<String>()
+        var plannedCaptures: [PlannedCaptureImport] = []
+        plannedCaptures.reserveCapacity(captures.count)
+        var totalBytes: Int64 = 0
 
         for capture in captures {
-            let duplicateState = duplicateIndex.duplicateState(for: capture)
-            let expectedCopiedBytes: Int64 = duplicateState == .duplicate && !overwriteDuplicates ? 0 : capture.totalSize
+            try Task.checkCancellation()
+            let duplicateState = index.duplicateState(for: capture)
+            try Task.checkCancellation()
+            let skipsDuplicate = duplicateState == .duplicate && !overwriteDuplicates
+            let destinationDirectory = DestinationImportPlanner.destinationDirectory(
+                for: capture,
+                destinationRoot: destinationRoot,
+                organizationMode: organizationMode,
+                cameraName: cameraName
+            )
+            var files: [PlannedFileImport] = []
+            var duplicateFiles: [PlannedExistingFile] = []
+
+            if skipsDuplicate {
+                duplicateFiles = try capture.memberFiles.map { file in
+                    guard let matchedURL = index.match(for: file) else {
+                        throw CocoaError(.fileNoSuchFile)
+                    }
+                    return try existingFile(at: matchedURL)
+                }
+            } else {
+                files.reserveCapacity(capture.memberFiles.count)
+                for file in capture.memberFiles {
+                    try Task.checkCancellation()
+                    let defaultURL = destinationDirectory.appendingPathComponent(file.fileName, isDirectory: false)
+                    let defaultPath = defaultURL.standardizedFileURL.path(percentEncoded: false)
+                    let exists = fileManager.fileExists(atPath: defaultPath)
+                    let destinationURL: URL
+                    let action: PlannedFileImport.Action
+
+                    if reservedPaths.contains(defaultPath) {
+                        destinationURL = uniqueURL(for: defaultURL, reservedPaths: reservedPaths)
+                        action = .rename
+                    } else if overwriteDuplicates {
+                        destinationURL = defaultURL
+                        action = exists ? .replace : .copy
+                    } else if exists {
+                        destinationURL = uniqueURL(for: defaultURL, reservedPaths: reservedPaths)
+                        action = .rename
+                    } else {
+                        destinationURL = defaultURL
+                        action = .copy
+                    }
+
+                    reservedPaths.insert(destinationURL.standardizedFileURL.path(percentEncoded: false))
+                    let existingSnapshot = action == .replace ? try existingFile(at: destinationURL) : nil
+                    files.append(PlannedFileImport(
+                        source: file,
+                        destinationURL: destinationURL,
+                        action: action,
+                        existingFile: existingSnapshot
+                    ))
+                }
+                totalBytes += capture.totalSize
+            }
+
+            plannedCaptures.append(PlannedCaptureImport(
+                capture: capture,
+                duplicateState: duplicateState,
+                destinationDirectory: destinationDirectory,
+                files: files,
+                skipsDuplicate: skipsDuplicate,
+                duplicateFiles: duplicateFiles
+            ))
+        }
+
+        return ImportPlan(captures: plannedCaptures, totalBytes: totalBytes)
+    }
+
+    func importCaptures(
+        _ plan: ImportPlan,
+        onProgress: @escaping @Sendable (ImportProgress) -> Void = { _ in }
+    ) -> ImportSessionResult {
+        var results: [CaptureImportResult] = []
+        var progress = ImportProgressReporter(
+            totalCaptures: plan.captures.count,
+            totalBytes: plan.totalBytes,
+            onProgress: onProgress
+        )
+        progress.start(firstCaptureName: plan.captures.first?.capture.displayName)
+
+        for plannedCapture in plan.captures {
+            let capture = plannedCapture.capture
+            let expectedCopiedBytes: Int64 = plannedCapture.skipsDuplicate ? 0 : capture.totalSize
             progress.beginCapture(capture, expectedCopiedBytes: expectedCopiedBytes)
 
-            if duplicateState == .duplicate && !overwriteDuplicates {
+            if plannedCapture.skipsDuplicate {
                 results.append(
                     CaptureImportResult(
                         captureID: capture.id,
-                        status: .skippedDuplicate,
+                        status: plannedCapture.duplicateFiles.allSatisfy(isUnchanged) ? .skippedDuplicate : .failed,
                         importedURLs: [],
                         isDeleteEligible: false
                     )
@@ -59,11 +184,7 @@ struct ImportCoordinator {
 
             do {
                 let importedURLs = try importCapture(
-                    capture,
-                    destinationRoot: destinationRoot,
-                    organizationMode: organizationMode,
-                    cameraName: cameraName,
-                    overwriteDuplicates: overwriteDuplicates,
+                    plannedCapture,
                     onCopiedBytes: { byteCount in
                         progress.advanceCompletedBytes(by: byteCount)
                     }
@@ -97,48 +218,24 @@ struct ImportCoordinator {
     }
 
     private func importCapture(
-        _ capture: LogicalCapture,
-        destinationRoot: URL,
-        organizationMode: DestinationOrganizationMode,
-        cameraName: String,
-        overwriteDuplicates: Bool,
+        _ plannedCapture: PlannedCaptureImport,
         onCopiedBytes: (Int64) -> Void
     ) throws -> [URL] {
-        let destinationDirectory = DestinationImportPlanner.destinationDirectory(
-            for: capture,
-            destinationRoot: destinationRoot,
-            organizationMode: organizationMode,
-            cameraName: cameraName
-        )
-        try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
-
-        let defaultDestinationURLs = capture.memberFiles.reduce(into: [String: URL]()) { partialResult, file in
-            partialResult[file.id] = destinationDirectory.appendingPathComponent(file.fileName, isDirectory: false)
-        }
-
-        let finalDestinationURLs = capture.memberFiles.reduce(into: [String: URL]()) { partialResult, file in
-            let defaultURL = defaultDestinationURLs[file.id] ?? destinationDirectory.appendingPathComponent(file.fileName, isDirectory: false)
-
-            if overwriteDuplicates {
-                partialResult[file.id] = defaultURL
-            } else if fileManager.fileExists(atPath: defaultURL.path(percentEncoded: false)) {
-                partialResult[file.id] = uniqueURL(for: defaultURL)
-            } else {
-                partialResult[file.id] = defaultURL
-            }
-        }
+        try fileManager.createDirectory(at: plannedCapture.destinationDirectory, withIntermediateDirectories: true)
 
         var importedURLs: [URL] = []
         var rollbackActions: [ImportRollbackAction] = []
 
         do {
-            for file in capture.memberFiles {
-                let finalURL = finalDestinationURLs[file.id] ?? destinationDirectory.appendingPathComponent(file.fileName, isDirectory: false)
-
+            for plannedFile in plannedCapture.files {
+                let finalURL = plannedFile.destinationURL
+                if let existingFile = plannedFile.existingFile, !isUnchanged(existingFile) {
+                    throw CocoaError(.fileWriteFileExists)
+                }
                 try importFile(
-                    file,
+                    plannedFile.source,
                     to: finalURL,
-                    overwriteExisting: overwriteDuplicates,
+                    overwriteExisting: plannedFile.action == .replace,
                     rollbackActions: &rollbackActions,
                     onCopiedBytes: onCopiedBytes
                 )
@@ -314,7 +411,7 @@ struct ImportCoordinator {
         return candidateURL
     }
 
-    private func uniqueURL(for destinationURL: URL) -> URL {
+    private func uniqueURL(for destinationURL: URL, reservedPaths: Set<String>) -> URL {
         let directory = destinationURL.deletingLastPathComponent()
         let stem = destinationURL.deletingPathExtension().lastPathComponent
         let fileExtension = destinationURL.pathExtension
@@ -322,7 +419,8 @@ struct ImportCoordinator {
         var candidateIndex = 2
         var candidateURL = destinationURL
 
-        while fileManager.fileExists(atPath: candidateURL.path(percentEncoded: false)) {
+        while fileManager.fileExists(atPath: candidateURL.path(percentEncoded: false))
+            || reservedPaths.contains(candidateURL.standardizedFileURL.path(percentEncoded: false)) {
             let fileName = if fileExtension.isEmpty {
                 "\(stem) \(candidateIndex)"
             } else {
@@ -333,6 +431,25 @@ struct ImportCoordinator {
         }
 
         return candidateURL
+    }
+
+    private func existingFile(at url: URL) throws -> PlannedExistingFile {
+        let attributes = try fileManager.attributesOfItem(atPath: url.path(percentEncoded: false))
+        guard let size = attributes[.size] as? NSNumber else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        return PlannedExistingFile(
+            url: url,
+            size: size.int64Value,
+            modificationDate: attributes[.modificationDate] as? Date
+        )
+    }
+
+    private func isUnchanged(_ file: PlannedExistingFile) -> Bool {
+        guard let current = try? existingFile(at: file.url) else {
+            return false
+        }
+        return current.size == file.size && current.modificationDate == file.modificationDate
     }
 }
 

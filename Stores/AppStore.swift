@@ -180,7 +180,6 @@ private struct CaptureCacheSnapshot: Sendable {
     let captures: [LogicalCapture]
     let captureIDs: [String]
     let captureByID: [String: LogicalCapture]
-    let captureSizeByID: [String: Int64]
     let sidecarFilesInSelectedSource: [SourceAssetFile]
     let captureRows: [CaptureRowPresentation]
 
@@ -191,7 +190,6 @@ private struct CaptureCacheSnapshot: Sendable {
         self.captures = captures
         self.captureIDs = captures.map(\.id)
         self.captureByID = Dictionary(captures.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        self.captureSizeByID = Dictionary(captures.map { ($0.id, $0.totalSize) }, uniquingKeysWith: { first, _ in first })
         self.sidecarFilesInSelectedSource = captures
             .flatMap(\.memberFiles)
             .filter(\.isHelperFile)
@@ -218,19 +216,12 @@ private struct LoadedSourceSnapshot: Sendable {
     }
 }
 
-private struct SelectionSummary: Equatable, Sendable {
-    var count: Int
-    var totalSize: Int64
-    var duplicateCount: Int
-    var partialDuplicateCount: Int
-}
-
 @MainActor
 @Observable
 final class AppStore {
     typealias DiscoverVolumeSourcesAction = @Sendable () -> [SourceDevice]
     typealias DiscoverImageCaptureSourcesAction = @MainActor () -> [SourceDevice]
-    typealias ScanSourceAction = @Sendable (SourceDevice) -> [SourceAssetFile]
+    typealias ScanSourceAction = @Sendable (SourceDevice) throws -> [SourceAssetFile]
     typealias GroupAssetsAction = @Sendable ([SourceAssetFile]) -> CaptureGroupingResult
     typealias DuplicateStateResolver = @Sendable ([LogicalCapture], URL, DestinationOrganizationMode, String) async -> [String: CaptureDuplicateState]
     typealias ImportProgressHandler = @Sendable (ImportProgress) -> Void
@@ -274,8 +265,7 @@ final class AppStore {
     private var isApplyingCaptureCacheSnapshot = false
 
     @ObservationIgnored private var captureByID: [String: LogicalCapture] = [:]
-    @ObservationIgnored private var captureSizeByID: [String: Int64] = [:]
-    @ObservationIgnored private var selectedCaptureIDSet: Set<String> = []
+    @ObservationIgnored private var captureSelection = CaptureSelection()
 
     var sources: [SourceDevice] = []
     var selectedSource: SourceDevice?
@@ -301,6 +291,7 @@ final class AppStore {
     var showUnknownFolders = false
     var lastImportResult: ImportSessionResult?
     var isLoadingSource = false
+    private(set) var sourceLoadingErrorMessage: String?
     var isImporting = false
     var importProgress: ImportProgress?
     var ejectingSourceID: String?
@@ -344,7 +335,7 @@ final class AppStore {
                 return []
             }
 
-            return (try? VolumeSourceScanner().scan(sourceID: source.id, rootURL: rootURL)) ?? []
+            return try VolumeSourceScanner().scan(sourceID: source.id, rootURL: rootURL)
         },
         groupAssets: @escaping GroupAssetsAction = { CaptureGrouper().group($0) },
         duplicateStateResolver: @escaping DuplicateStateResolver = { captures, destinationURL, organizationMode, cameraName in
@@ -515,6 +506,7 @@ final class AppStore {
 
         selectedSource = source
         isLoadingSource = true
+        sourceLoadingErrorMessage = nil
         applyCaptureCacheSnapshot(CaptureCacheSnapshot(captures: [], duplicateStatesByCaptureID: [:]))
         unknownFolders = []
         pendingDeletionCaptureIDs = []
@@ -527,16 +519,21 @@ final class AppStore {
         let groupAssets = groupAssets
 
         sourceLoadingTask = Task.detached(priority: .userInitiated) { [weak self] in
-            let scannedFiles = scanSource(source)
-            guard !Task.isCancelled else { return }
+            do {
+                let scannedFiles = try scanSource(source)
+                guard !Task.isCancelled else { return }
 
-            let grouping = groupAssets(scannedFiles)
-            guard !Task.isCancelled else { return }
+                let grouping = groupAssets(scannedFiles)
+                guard !Task.isCancelled else { return }
 
-            let snapshot = LoadedSourceSnapshot(grouping: grouping)
-            guard !Task.isCancelled else { return }
+                let snapshot = LoadedSourceSnapshot(grouping: grouping)
+                guard !Task.isCancelled else { return }
 
-            await self?.applyLoadedSource(snapshot, generation: generation)
+                await self?.applyLoadedSource(snapshot, generation: generation)
+            } catch {
+                guard !Task.isCancelled else { return }
+                await self?.applySourceLoadingFailure(error.localizedDescription, generation: generation)
+            }
         }
     }
 
@@ -570,7 +567,7 @@ final class AppStore {
     }
 
     func isCaptureSelected(id: String) -> Bool {
-        selectedCaptureIDSet.contains(id)
+        captureSelection.idSet.contains(id)
     }
 
     func setCaptureSelected(_ capture: LogicalCapture, isSelected: Bool) {
@@ -578,15 +575,8 @@ final class AppStore {
     }
 
     func setCaptureSelected(id: String, isSelected: Bool) {
-        guard captureByID[id] != nil else {
-            return
-        }
-
-        if isSelected {
-            appendSelectedCaptureID(id)
-        } else {
-            removeSelectedCaptureID(id)
-        }
+        captureSelection.setSelected(id, isSelected: isSelected)
+        publishCaptureSelection()
     }
 
     func selectAllCaptures() {
@@ -598,29 +588,13 @@ final class AppStore {
     }
 
     func toggleMarks(for ids: Set<String>) {
-        guard !ids.isEmpty else { return }
-
-        let allAlreadyMarked = ids.isSubset(of: selectedCaptureIDSet)
-
-        if allAlreadyMarked {
-            replaceSelectedCaptureIDs(selectedCaptureIDs.filter { !ids.contains($0) })
-        } else {
-            let missing = ids.subtracting(selectedCaptureIDSet)
-            let additions = captureIDs.filter { missing.contains($0) }
-            appendSelectedCaptureIDs(additions)
-        }
+        captureSelection.toggleMarks(ids, inCaptureOrder: captureIDs)
+        publishCaptureSelection()
     }
 
     func replaceSelectedCaptureIDs(_ ids: [String]) {
-        var seenIDs = Set<String>()
-        var filteredIDs: [String] = []
-        filteredIDs.reserveCapacity(ids.count)
-
-        for id in ids where captureByID[id] != nil && seenIDs.insert(id).inserted {
-            filteredIDs.append(id)
-        }
-
-        applySelectedCaptureIDs(filteredIDs, idSet: seenIDs)
+        captureSelection.replace(ids)
+        publishCaptureSelection()
     }
 
     func dismissPendingDeletion() {
@@ -933,6 +907,7 @@ final class AppStore {
 
         selectedSource = nil
         isLoadingSource = false
+        sourceLoadingErrorMessage = nil
         applyCaptureCacheSnapshot(CaptureCacheSnapshot(captures: [], duplicateStatesByCaptureID: [:]))
         unknownFolders = []
         pendingDeletionCaptureIDs = []
@@ -977,6 +952,15 @@ final class AppStore {
         refreshDuplicateStates(preselectNonDuplicates: true)
     }
 
+    private func applySourceLoadingFailure(_ message: String, generation: Int) {
+        guard generation == sourceLoadingGeneration else {
+            return
+        }
+
+        sourceLoadingErrorMessage = message
+        isLoadingSource = false
+    }
+
     private func refreshDuplicateStates(preselectNonDuplicates: Bool = false) {
         duplicateDetectionTask?.cancel()
         duplicateDetectionGeneration += 1
@@ -989,7 +973,8 @@ final class AppStore {
         guard let destinationURL, destinationAvailability.isReachable else {
             duplicateStatesByCaptureID = [:]
             refreshCaptureRows(with: [:])
-            rebuildSelectionTotals()
+            captureSelection.updateDuplicateStates([:])
+            publishCaptureSelection()
             if preselectNonDuplicates {
                 replaceSelectedCaptureIDs(captureIDs)
             }
@@ -1035,7 +1020,8 @@ final class AppStore {
         duplicateStatesByCaptureID = states
         duplicateStatesAreResolved = true
         captureRows = rows
-        rebuildSelectionTotals()
+        captureSelection.updateDuplicateStates(states)
+        publishCaptureSelection()
         if preselectNonDuplicates {
             replaceSelectedCaptureIDs(capturesSnapshot
                 .filter { (states[$0.id] ?? .unique) != .duplicate }
@@ -1269,10 +1255,11 @@ final class AppStore {
         isApplyingCaptureCacheSnapshot = false
         captureIDs = snapshot.captureIDs
         captureByID = snapshot.captureByID
-        captureSizeByID = snapshot.captureSizeByID
         sidecarFilesInSelectedSource = snapshot.sidecarFilesInSelectedSource
         captureRows = snapshot.captureRows
-        replaceSelectedCaptureIDs(selectedCaptureIDs)
+        captureSelection.updateCaptures(snapshot.captures)
+        captureSelection.updateDuplicateStates(duplicateStatesByCaptureID)
+        publishCaptureSelection()
     }
 
     private func rebuildCaptureCaches() {
@@ -1306,79 +1293,11 @@ final class AppStore {
         )
     }
 
-    private func appendSelectedCaptureIDs(_ ids: [String]) {
-        guard !ids.isEmpty else {
-            return
+    private func publishCaptureSelection() {
+        if selectedCaptureIDs != captureSelection.ids {
+            selectedCaptureIDs = captureSelection.ids
         }
-
-        var updatedIDs = selectedCaptureIDs
-        var updatedSet = selectedCaptureIDSet
-        updatedIDs.reserveCapacity(selectedCaptureIDs.count + ids.count)
-
-        for id in ids {
-            guard captureByID[id] != nil, updatedSet.insert(id).inserted else {
-                continue
-            }
-
-            updatedIDs.append(id)
-        }
-
-        applySelectedCaptureIDs(updatedIDs, idSet: updatedSet)
-    }
-
-    private func appendSelectedCaptureID(_ id: String) {
-        guard captureByID[id] != nil, !selectedCaptureIDSet.contains(id) else {
-            return
-        }
-
-        applySelectedCaptureIDs(
-            selectedCaptureIDs + [id],
-            idSet: selectedCaptureIDSet.union([id])
-        )
-    }
-
-    private func removeSelectedCaptureID(_ id: String) {
-        guard selectedCaptureIDSet.contains(id) else {
-            return
-        }
-
-        var updatedSet = selectedCaptureIDSet
-        updatedSet.remove(id)
-        applySelectedCaptureIDs(
-            selectedCaptureIDs.filter { $0 != id },
-            idSet: updatedSet
-        )
-    }
-
-    private func rebuildSelectionTotals() {
-        applySelectionSummary(selectionSummary(for: selectedCaptureIDs))
-    }
-
-    private func applySelectedCaptureIDs(_ ids: [String], idSet: Set<String>) {
-        if selectedCaptureIDs != ids {
-            selectedCaptureIDs = ids
-        }
-        selectedCaptureIDSet = idSet
-        applySelectionSummary(selectionSummary(for: ids))
-    }
-
-    private func selectionSummary(for ids: [String]) -> SelectionSummary {
-        ids.reduce(into: SelectionSummary(count: 0, totalSize: 0, duplicateCount: 0, partialDuplicateCount: 0)) { summary, id in
-            summary.count += 1
-            summary.totalSize += captureSizeByID[id] ?? 0
-
-            switch duplicateStateForCaptureID(id) {
-            case .duplicate:
-                summary.duplicateCount += 1
-            case .partial:
-                summary.partialDuplicateCount += 1
-            case .unique:
-                break
-            }
-        }
-    }
-
-    private func applySelectionSummary(_ summary: SelectionSummary) {
+        let summary = captureSelection.summary
         if selectedCaptureCount != summary.count {
             selectedCaptureCount = summary.count
         }
@@ -1391,10 +1310,6 @@ final class AppStore {
         if selectedPartialDuplicateCaptureCount != summary.partialDuplicateCount {
             selectedPartialDuplicateCaptureCount = summary.partialDuplicateCount
         }
-    }
-
-    private func duplicateStateForCaptureID(_ id: String) -> CaptureDuplicateState {
-        duplicateStatesByCaptureID[id] ?? .unique
     }
 
     private func refreshCaptureRows(with states: [String: CaptureDuplicateState]? = nil) {

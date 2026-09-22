@@ -14,6 +14,10 @@ struct ContentView: View {
     @State private var showingClearSidecarConfirmation = false
     @State private var showingCaptureSourceDeletionConfirmation = false
     @State private var captureIDsPendingSourceDeletion: Set<String> = []
+    @State private var importPreview: ImportPlan?
+    @State private var showingImportPreview = false
+    @State private var importPreviewError: String?
+    @State private var isPreparingImportPreview = false
 
     private var inspectedCapture: LogicalCapture? {
         guard !tableSelection.isEmpty else {
@@ -60,6 +64,8 @@ struct ContentView: View {
                 DestinationToolbarView(
                     store: store,
                     onChooseDestination: chooseDestinationFolder,
+                    isPreparingImportPreview: isPreparingImportPreview,
+                    onPreviewImport: previewImport,
                     onImportSelected: { beginImport(importAll: false) },
                     onImportAll: { beginImport(importAll: true) }
                 )
@@ -129,6 +135,22 @@ struct ContentView: View {
             showingCaptureSourceDeletionConfirmation: $showingCaptureSourceDeletionConfirmation,
             captureIDsPendingSourceDeletion: $captureIDsPendingSourceDeletion
         )
+        .sheet(isPresented: $showingImportPreview) {
+            if let importPreview {
+                ImportPreviewView(plan: importPreview) {
+                    showingImportPreview = false
+                    importPreviewedSelection(importPreview)
+                }
+            }
+        }
+        .alert("Unable to Preview Import", isPresented: Binding(
+            get: { importPreviewError != nil },
+            set: { if !$0 { importPreviewError = nil } }
+        )) {
+            Button("OK", role: .cancel) { importPreviewError = nil }
+        } message: {
+            Text(importPreviewError ?? "The destination could not be checked.")
+        }
     }
 
     private func refreshSources(preferNewDetectedMedia: Bool = false) {
@@ -155,6 +177,58 @@ struct ContentView: View {
             } else {
                 await store.importSelectedCaptures(overwriteDuplicates: false)
             }
+        }
+    }
+
+    private func previewImport() {
+        guard let destinationURL = store.destinationURL,
+              store.canImportSelection,
+              !isPreparingImportPreview else {
+            return
+        }
+
+        let captures = store.selectedCaptures
+        let captureIDs = store.selectedCaptureIDs
+        let mode = store.organizationMode
+        let cameraName = store.selectedSource?.displayName ?? "Imports"
+        let sourceID = store.selectedSource?.id
+        isPreparingImportPreview = true
+
+        Task {
+            defer { isPreparingImportPreview = false }
+            do {
+                let plan = try await Task.detached(priority: .userInitiated) {
+                    try ImportCoordinator().planCaptures(
+                        captures,
+                        destinationRoot: destinationURL,
+                        organizationMode: mode,
+                        cameraName: cameraName,
+                        overwriteDuplicates: false
+                    )
+                }.value
+                guard !Task.isCancelled,
+                      store.destinationURL == destinationURL,
+                      store.selectedCaptureIDs == captureIDs,
+                      store.organizationMode == mode,
+                      store.selectedSource?.id == sourceID else { return }
+                importPreview = plan
+                showingImportPreview = true
+            } catch {
+                importPreviewError = error.localizedDescription
+            }
+        }
+    }
+
+    private func importPreviewedSelection(_ plan: ImportPlan) {
+        guard store.selectedCaptureIDs == plan.captures.map(\.capture.id) else {
+            importPreviewError = "The selected captures changed. Preview the import again."
+            return
+        }
+
+        Task {
+            await store.resolveDestinationAvailability(refreshDependents: false)
+            guard store.canImportSelection else { return }
+            await store.importSelectedCaptures(overwriteDuplicates: false)
         }
     }
 

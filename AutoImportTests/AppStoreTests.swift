@@ -655,6 +655,46 @@ struct AppStoreTests {
     }
 
     @Test
+    func scanFailureIsVisibleAndClearsWhenSourceIsReloaded() async {
+        let source = SourceDevice(
+            id: "camera",
+            displayName: "Camera",
+            kind: .mountedVolume,
+            rootURL: URL(fileURLWithPath: "/Volumes/Camera"),
+            subtitle: "Mounted",
+            state: .ready
+        )
+        let attempts = LockedTestValue(0)
+        let store = AppStore(
+            discoverVolumeSources: { [source] },
+            discoverImageCaptureSources: { [] },
+            scanSource: { _ in
+                let attempt = attempts.get()
+                attempts.update { $0 += 1 }
+                if attempt == 0 {
+                    throw CocoaError(.fileReadNoSuchFile)
+                }
+                return []
+            }
+        )
+
+        store.loadSource(source)
+        await store.awaitSourceLoading()
+
+        #expect(store.sourceLoadingErrorMessage != nil)
+        #expect(!store.isLoadingSource)
+        #expect(store.captures.isEmpty)
+
+        store.loadSource(source)
+        #expect(store.sourceLoadingErrorMessage == nil)
+        await store.awaitSourceLoading()
+
+        #expect(store.sourceLoadingErrorMessage == nil)
+        #expect(!store.isLoadingSource)
+        #expect(attempts.get() == 2)
+    }
+
+    @Test
     func cancelledImportCannotPublishStaleResultAfterSourceReload() async throws {
         let importingSource = SourceDevice(
             id: "importing",

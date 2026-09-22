@@ -3,6 +3,8 @@ import SwiftUI
 struct DestinationToolbarView: View {
     @Bindable var store: AppStore
     let onChooseDestination: () -> Void
+    let isPreparingImportPreview: Bool
+    let onPreviewImport: () -> Void
     let onImportSelected: () -> Void
     let onImportAll: () -> Void
 
@@ -13,6 +15,8 @@ struct DestinationToolbarView: View {
             DestinationToolbarControls(
                 store: store,
                 onChooseDestination: onChooseDestination,
+                isPreparingImportPreview: isPreparingImportPreview,
+                onPreviewImport: onPreviewImport,
                 onImportSelected: onImportSelected,
                 onImportAll: onImportAll
             )
@@ -95,6 +99,8 @@ private struct DestinationImportProgressBanner: View {
 private struct DestinationToolbarControls: View {
     @Bindable var store: AppStore
     let onChooseDestination: () -> Void
+    let isPreparingImportPreview: Bool
+    let onPreviewImport: () -> Void
     let onImportSelected: () -> Void
     let onImportAll: () -> Void
 
@@ -218,6 +224,7 @@ private struct DestinationToolbarControls: View {
             HStack(spacing: 10) {
                 selectAllButton
                 deselectAllButton
+                previewImportButton
                 importAllButton
                 importSelectedButton
             }
@@ -229,6 +236,7 @@ private struct DestinationToolbarControls: View {
                 }
 
                 HStack(spacing: 10) {
+                    previewImportButton
                     importAllButton
                     importSelectedButton
                 }
@@ -267,6 +275,21 @@ private struct DestinationToolbarControls: View {
         .buttonStyle(.bordered)
         .controlSize(.large)
         .disabled(!store.canImportAllCaptures)
+    }
+
+    private var previewImportButton: some View {
+        Button(action: onPreviewImport) {
+            if isPreparingImportPreview {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Label("Preview", systemImage: "list.bullet.rectangle")
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .disabled(!store.canImportSelection || isPreparingImportPreview)
+        .help("Preview destinations and conflicts for marked captures")
     }
 
     private var importSelectedButton: some View {

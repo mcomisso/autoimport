@@ -19,8 +19,8 @@ struct CaptureListView: View {
 
             if store.captures.isEmpty {
                 ContentUnavailableView(
-                    "No captures found",
-                    systemImage: "photo.on.rectangle.angled",
+                    emptyStateTitle,
+                    systemImage: store.sourceLoadingErrorMessage == nil ? "photo.on.rectangle.angled" : "exclamationmark.triangle",
                     description: Text(emptyStateMessage)
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -193,11 +193,27 @@ struct CaptureListView: View {
     }
 
     private var emptyStateMessage: String {
+        if let sourceLoadingErrorMessage = store.sourceLoadingErrorMessage {
+            return sourceLoadingErrorMessage
+        }
+
+        if store.isLoadingSource {
+            return "Looking for captures in this source."
+        }
+
         if store.selectedSource?.kind == .imageCaptureDevice {
             return "This device is visible through Image Capture but does not expose a browsable mounted volume yet."
         }
 
         return "Connect a camera or add a source folder to scan for media."
+    }
+
+    private var emptyStateTitle: String {
+        if store.sourceLoadingErrorMessage != nil {
+            return "Unable to scan source"
+        }
+
+        return store.isLoadingSource ? "Scanning source" : "No captures found"
     }
 
     private var clearSidecarHelp: String {
