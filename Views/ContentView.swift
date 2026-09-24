@@ -112,9 +112,13 @@ struct ContentView: View {
         .mountedMediaNotifications(
             isEnabled: !isRunningTests,
             onMount: { mountedURL in
-                refreshSources(preferNewDetectedMedia: true, mountedVolumeURL: mountedURL)
+                refreshSources(
+                    preferNewDetectedMedia: true,
+                    mountedVolumeURL: mountedURL,
+                    reloadSelectedSource: false
+                )
             },
-            onUnmount: { refreshSources() }
+            onUnmount: { refreshSources(reloadSelectedSource: false) }
         )
         .onChange(of: store.captureIDs) { _, captureIDs in
             let validIDs = Set(captureIDs)
@@ -157,11 +161,13 @@ struct ContentView: View {
 
     private func refreshSources(
         preferNewDetectedMedia: Bool = false,
-        mountedVolumeURL: URL? = nil
+        mountedVolumeURL: URL? = nil,
+        reloadSelectedSource: Bool = true
     ) {
         store.refreshSourcesAndLoadPreferredSource(
             preferNewDetectedMedia: preferNewDetectedMedia,
-            mountedVolumeURL: mountedVolumeURL
+            mountedVolumeURL: mountedVolumeURL,
+            reloadSelectedSource: reloadSelectedSource
         )
     }
 

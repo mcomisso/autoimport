@@ -48,7 +48,6 @@ struct ImportCoordinator {
         organizationMode: DestinationOrganizationMode,
         cameraName: String,
         overwriteDuplicates: Bool,
-        duplicateIndex: DestinationFingerprintIndex? = nil,
         onProgress: @escaping @Sendable (ImportProgress) -> Void = { _ in }
     ) throws -> ImportSessionResult {
         let plan = try planCaptures(
@@ -56,8 +55,7 @@ struct ImportCoordinator {
             destinationRoot: destinationRoot,
             organizationMode: organizationMode,
             cameraName: cameraName,
-            overwriteDuplicates: overwriteDuplicates,
-            duplicateIndex: duplicateIndex
+            overwriteDuplicates: overwriteDuplicates
         )
         return importCaptures(plan, onProgress: onProgress)
     }
@@ -67,10 +65,9 @@ struct ImportCoordinator {
         destinationRoot: URL,
         organizationMode: DestinationOrganizationMode,
         cameraName: String,
-        overwriteDuplicates: Bool,
-        duplicateIndex: DestinationFingerprintIndex? = nil
+        overwriteDuplicates: Bool
     ) throws -> ImportPlan {
-        let index = try duplicateIndex ?? DestinationFingerprintIndex.buildForImportDestinations(
+        let index = try DestinationFingerprintIndex.buildForImportDestinations(
             captures: captures,
             destinationRoot: destinationRoot,
             organizationMode: organizationMode,
@@ -78,6 +75,7 @@ struct ImportCoordinator {
             fileManager: fileManager
         )
         var reservedPaths = Set<String>()
+        var nextSuffixByPath: [String: Int] = [:]
         var plannedCaptures: [PlannedCaptureImport] = []
         plannedCaptures.reserveCapacity(captures.count)
         var totalBytes: Int64 = 0
@@ -114,13 +112,21 @@ struct ImportCoordinator {
                     let action: PlannedFileImport.Action
 
                     if reservedPaths.contains(defaultPath) {
-                        destinationURL = uniqueURL(for: defaultURL, reservedPaths: reservedPaths)
+                        destinationURL = uniqueURL(
+                            for: defaultURL,
+                            reservedPaths: reservedPaths,
+                            nextSuffixByPath: &nextSuffixByPath
+                        )
                         action = .rename
                     } else if overwriteDuplicates {
                         destinationURL = defaultURL
                         action = exists ? .replace : .copy
                     } else if exists {
-                        destinationURL = uniqueURL(for: defaultURL, reservedPaths: reservedPaths)
+                        destinationURL = uniqueURL(
+                            for: defaultURL,
+                            reservedPaths: reservedPaths,
+                            nextSuffixByPath: &nextSuffixByPath
+                        )
                         action = .rename
                     } else {
                         destinationURL = defaultURL
@@ -411,16 +417,20 @@ struct ImportCoordinator {
         return candidateURL
     }
 
-    private func uniqueURL(for destinationURL: URL, reservedPaths: Set<String>) -> URL {
+    private func uniqueURL(
+        for destinationURL: URL,
+        reservedPaths: Set<String>,
+        nextSuffixByPath: inout [String: Int]
+    ) -> URL {
         let directory = destinationURL.deletingLastPathComponent()
         let stem = destinationURL.deletingPathExtension().lastPathComponent
         let fileExtension = destinationURL.pathExtension
+        let basePath = destinationURL.standardizedFileURL.path(percentEncoded: false)
 
-        var candidateIndex = 2
-        var candidateURL = destinationURL
+        var candidateIndex = nextSuffixByPath[basePath] ?? 2
+        var candidateURL: URL
 
-        while fileManager.fileExists(atPath: candidateURL.path(percentEncoded: false))
-            || reservedPaths.contains(candidateURL.standardizedFileURL.path(percentEncoded: false)) {
+        while true {
             let fileName = if fileExtension.isEmpty {
                 "\(stem) \(candidateIndex)"
             } else {
@@ -428,9 +438,12 @@ struct ImportCoordinator {
             }
             candidateURL = directory.appendingPathComponent(fileName, isDirectory: false)
             candidateIndex += 1
+            let candidatePath = candidateURL.standardizedFileURL.path(percentEncoded: false)
+            if !reservedPaths.contains(candidatePath) && !fileManager.fileExists(atPath: candidatePath) {
+                nextSuffixByPath[basePath] = candidateIndex
+                return candidateURL
+            }
         }
-
-        return candidateURL
     }
 
     private func existingFile(at url: URL) throws -> PlannedExistingFile {

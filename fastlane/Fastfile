@@ -67,6 +67,9 @@ platform :mac do
   end
 
   def bump_version(version)
+    current_version = sh("cd .. && grep -m1 'MARKETING_VERSION:' project.yml | awk '{print $2}'").strip
+    return if current_version == version
+
     current_build = sh("cd .. && grep -m1 'CURRENT_PROJECT_VERSION:' project.yml | awk '{print $2}'").strip.to_i
     sh("cd .. && sed -i '' 's/MARKETING_VERSION: .*/MARKETING_VERSION: #{version}/' project.yml")
     sh("cd .. && sed -i '' 's/CURRENT_PROJECT_VERSION: .*/CURRENT_PROJECT_VERSION: #{current_build + 1}/' project.yml")

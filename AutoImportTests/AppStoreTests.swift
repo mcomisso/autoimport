@@ -342,6 +342,54 @@ struct AppStoreTests {
     }
 
     @Test
+    func volumeNotificationKeepsSelectedCaptureScanUnlessSourceChanges() async {
+        let selected = makeMountedSource(id: "selected", volumeID: "selected-volume")
+        let unrelated = makeMountedSource(id: "unrelated", volumeID: "other-volume")
+        let discovered = LockedTestValue([selected, unrelated])
+        let scanCount = LockedTestValue(0)
+        let store = AppStore(
+            discoverVolumeSources: { discovered.get() },
+            discoverImageCaptureSources: { [] },
+            scanSource: { _ in
+                scanCount.update { $0 += 1 }
+                return []
+            },
+            groupAssets: { _ in CaptureGroupingResult(captures: [], unknownFolders: []) },
+            duplicateStateResolver: { _, _, _, _ in [:] },
+            importCapturesAction: { _, _, _, _, _, _ in ImportSessionResult(captureResults: []) },
+            deleteCaptureFilesAction: { _ in }
+        )
+
+        store.loadSource(selected)
+        await store.awaitSourceLoading()
+        #expect(scanCount.get() == 1)
+
+        store.refreshSourcesAndLoadPreferredSource(reloadSelectedSource: false)
+        await store.awaitSourceLoading()
+        #expect(scanCount.get() == 1)
+        #expect(store.selectedSource?.id == selected.id)
+
+        store.refreshSourcesAndLoadPreferredSource()
+        await store.awaitSourceLoading()
+        #expect(scanCount.get() == 2)
+
+        let remounted = SourceDevice(
+            id: selected.id,
+            displayName: selected.displayName,
+            kind: .mountedVolume,
+            rootURL: URL(fileURLWithPath: "/Volumes/DJI-Remounted"),
+            subtitle: "Mounted",
+            state: .ready,
+            persistentVolumeID: selected.persistentVolumeID
+        )
+        discovered.set([remounted, unrelated])
+        store.refreshSourcesAndLoadPreferredSource(reloadSelectedSource: false)
+        await store.awaitSourceLoading()
+        #expect(scanCount.get() == 3)
+        #expect(store.selectedSource?.rootURL == remounted.rootURL)
+    }
+
+    @Test
     func automaticImportOnlyImportsUniqueCapturesFromDetectedMountedMedia() async throws {
         let suiteName = "AppStoreTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

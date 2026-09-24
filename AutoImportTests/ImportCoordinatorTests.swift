@@ -222,6 +222,38 @@ struct ImportCoordinatorTests {
         #expect(try Data(contentsOf: plan.captures[1].files[0].destinationURL) == Data("second".utf8))
     }
 
+    @Test
+    func repeatedFilenameCollisionsDoNotRecheckEarlierSuffixes() throws {
+        let sandbox = try makeSandbox()
+        defer { try? FileManager.default.removeItem(at: sandbox.rootURL) }
+
+        for suffix in 2...5 {
+            _ = try sandbox.writeDestinationFile(named: "DUP \(suffix).MP4", data: Data("existing".utf8))
+        }
+        _ = try sandbox.writeDestinationFile(named: "DUP.MP4", data: Data("existing".utf8))
+
+        let captures = try (0..<40).map { index in
+            let fileURL = try sandbox.writeSourceFile(
+                named: "Camera\(index)/DUP.MP4",
+                data: Data(repeating: UInt8(index), count: index + 10)
+            )
+            return makeSingleFileCapture(fileURL: fileURL)
+        }
+        let fileManager = FileExistenceCountingFileManager()
+
+        let plan = try ImportCoordinator(fileManager: fileManager).planCaptures(
+            captures,
+            destinationRoot: sandbox.destinationURL,
+            organizationMode: .flat,
+            cameraName: "Camera",
+            overwriteDuplicates: false
+        )
+
+        #expect(plan.captures.map { $0.files[0].destinationURL.lastPathComponent }
+            == (6...45).map { "DUP \($0).MP4" })
+        #expect(fileManager.fileExistenceChecks < 150)
+    }
+
     @Test(arguments: [false, true])
     func overwritePlanPreservesBothCapturesWithTheSameFilename(destinationInitiallyExists: Bool) throws {
         let sandbox = try makeSandbox()
@@ -303,6 +335,47 @@ struct ImportCoordinatorTests {
         #expect(plan.captures[0].files.isEmpty)
         #expect(plan.totalBytes == 0)
         #expect(coordinator.importCaptures(plan).captureResults[0].status == .skippedDuplicate)
+    }
+
+    @Test
+    func previewPlanReadsDestinationChangesAfterDuplicateDetection() throws {
+        let sandbox = try makeSandbox()
+        defer { try? FileManager.default.removeItem(at: sandbox.rootURL) }
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let sourceURL = try sandbox.writeSourceFile(named: "Camera/CLIP_0016.MP4", data: Data("same".utf8))
+        try setModificationDate(date, for: sourceURL)
+        let capture = makeSingleFileCapture(fileURL: sourceURL)
+        let coordinator = ImportCoordinator()
+
+        let initialIndex = try DestinationFingerprintIndex.buildForImportDestinations(
+            captures: [capture],
+            destinationRoot: sandbox.destinationURL,
+            organizationMode: .flat,
+            cameraName: "Camera"
+        )
+        #expect(initialIndex.duplicateState(for: capture) == .unique)
+
+        let destinationURL = try sandbox.writeDestinationFile(named: "CLIP_0016.MP4", data: Data("same".utf8))
+        try setModificationDate(date, for: destinationURL)
+        let addedFilePlan = try coordinator.planCaptures(
+            [capture],
+            destinationRoot: sandbox.destinationURL,
+            organizationMode: .flat,
+            cameraName: "Camera",
+            overwriteDuplicates: false
+        )
+        #expect(addedFilePlan.captures[0].skipsDuplicate)
+
+        try FileManager.default.removeItem(at: destinationURL)
+        let removedFilePlan = try coordinator.planCaptures(
+            [capture],
+            destinationRoot: sandbox.destinationURL,
+            organizationMode: .flat,
+            cameraName: "Camera",
+            overwriteDuplicates: false
+        )
+        #expect(removedFilePlan.captures[0].duplicateState == .unique)
+        #expect(removedFilePlan.captures[0].files[0].action == .copy)
     }
 
     @Test
@@ -426,6 +499,15 @@ private final class ReplacementMoveFailingFileManager: FileManager {
         }
 
         try super.moveItem(at: srcURL, to: dstURL)
+    }
+}
+
+private final class FileExistenceCountingFileManager: FileManager {
+    private(set) var fileExistenceChecks = 0
+
+    override func fileExists(atPath path: String) -> Bool {
+        fileExistenceChecks += 1
+        return super.fileExists(atPath: path)
     }
 }
 

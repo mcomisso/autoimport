@@ -1,5 +1,24 @@
+import Dispatch
 import Foundation
 import Observation
+
+private final class ImportProgressThrottler: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastPublishedNanoseconds: UInt64 = 0
+
+    func shouldPublish(_ progress: ImportProgress) -> Bool {
+        let now = DispatchTime.now().uptimeNanoseconds
+        lock.lock()
+        defer { lock.unlock() }
+
+        let isComplete = progress.completedCaptures >= progress.totalCaptures
+        guard isComplete || now - lastPublishedNanoseconds >= 100_000_000 else {
+            return false
+        }
+        lastPublishedNanoseconds = now
+        return true
+    }
+}
 
 struct CaptureRowPresentation: Identifiable, Hashable, Sendable {
     let id: String
@@ -228,7 +247,7 @@ final class AppStore {
     private let discoverImageCaptureSources: DiscoverImageCaptureSourcesAction
     private let scanSource: ScanSourceAction
     private let groupAssets: GroupAssetsAction
-    private let duplicateStateResolver: DuplicateStateResolver
+    private let duplicateStateResolver: DuplicateStateResolver?
     private let importCapturesAction: ImportCapturesAction
     private let deleteCaptureFilesAction: DeleteCaptureFilesAction
     private let deleteSourceFilesAction: DeleteSourceFilesAction
@@ -273,8 +292,9 @@ final class AppStore {
     }
     private(set) var captureIDs: [String] = []
     private(set) var captureRows: [CaptureRowPresentation] = []
+    private(set) var captureRowsRevision = 0
     var unknownFolders: [UnknownFolder] = []
-    private(set) var selectedCaptureIDs: [String] = []
+    var selectedCaptureIDs: [String] { captureSelection.ids }
     private(set) var selectedCaptureCount = 0
     private(set) var selectedCapturesTotalSize: Int64 = 0
     private(set) var selectedDuplicateCaptureCount = 0
@@ -321,24 +341,7 @@ final class AppStore {
             return try VolumeSourceScanner().scan(sourceID: source.id, rootURL: rootURL)
         },
         groupAssets: @escaping GroupAssetsAction = { CaptureGrouper().group($0) },
-        duplicateStateResolver: @escaping DuplicateStateResolver = { captures, destinationURL, organizationMode, cameraName in
-            guard let index = try? DestinationFingerprintIndex.buildForImportDestinations(
-                captures: captures,
-                destinationRoot: destinationURL,
-                organizationMode: organizationMode,
-                cameraName: cameraName
-            ) else {
-                return [:]
-            }
-
-            var results: [String: CaptureDuplicateState] = [:]
-            results.reserveCapacity(captures.count)
-            for capture in captures {
-                if Task.isCancelled { break }
-                results[capture.id] = index.duplicateState(for: capture)
-            }
-            return results
-        },
+        duplicateStateResolver: DuplicateStateResolver? = nil,
         importCapturesAction: @escaping ImportCapturesAction = { captures, destinationURL, organizationMode, cameraName, overwriteDuplicates, onProgress in
             try ImportCoordinator().importCaptures(
                 captures,
@@ -478,7 +481,8 @@ final class AppStore {
 
     func refreshSourcesAndLoadPreferredSource(
         preferNewDetectedMedia: Bool = false,
-        mountedVolumeURL: URL? = nil
+        mountedVolumeURL: URL? = nil,
+        reloadSelectedSource: Bool = true
     ) {
         let previousSourceIDs = Set(sources.map(\.id))
 
@@ -488,7 +492,8 @@ final class AppStore {
             preferNewDetectedMedia: preferNewDetectedMedia,
             mountedVolumeURL: mountedVolumeURL,
             previousSourceIDs: previousSourceIDs,
-            loadPreferredSourceAfterRefresh: true
+            loadPreferredSourceAfterRefresh: true,
+            reloadSelectedSource: reloadSelectedSource
         )
     }
 
@@ -760,7 +765,8 @@ final class AppStore {
         preferNewDetectedMedia: Bool,
         mountedVolumeURL: URL?,
         previousSourceIDs: Set<String>,
-        loadPreferredSourceAfterRefresh: Bool
+        loadPreferredSourceAfterRefresh: Bool,
+        reloadSelectedSource: Bool = true
     ) {
         sourceRefreshTask?.cancel()
         sourceRefreshGeneration += 1
@@ -785,7 +791,8 @@ final class AppStore {
                 preferNewDetectedMedia: preferNewDetectedMedia,
                 mountedVolumeURL: mountedVolumeURL,
                 previousSourceIDs: previousSourceIDs,
-                loadPreferredSourceAfterRefresh: loadPreferredSourceAfterRefresh
+                loadPreferredSourceAfterRefresh: loadPreferredSourceAfterRefresh,
+                reloadSelectedSource: reloadSelectedSource
             )
         }
     }
@@ -800,7 +807,8 @@ final class AppStore {
         preferNewDetectedMedia: Bool,
         mountedVolumeURL: URL?,
         previousSourceIDs: Set<String>,
-        loadPreferredSourceAfterRefresh: Bool
+        loadPreferredSourceAfterRefresh: Bool,
+        reloadSelectedSource: Bool
     ) {
         guard generation == sourceRefreshGeneration else {
             return
@@ -844,9 +852,16 @@ final class AppStore {
         let sourceToLoad = newDetectedMedia ?? selectedSource
 
         if let sourceToLoad {
-            loadSource(sourceToLoad, automaticImportOnLoad: newDetectedMedia?.id == sourceToLoad.id)
+            let sameLoadedSource = previousSelectedSource?.id == sourceToLoad.id
+                && previousSelectedSource?.kind == sourceToLoad.kind
+                && previousSelectedSource?.rootURL?.standardizedFileURL == sourceToLoad.rootURL?.standardizedFileURL
+            if reloadSelectedSource || newDetectedMedia != nil || !sameLoadedSource {
+                loadSource(sourceToLoad, automaticImportOnLoad: newDetectedMedia?.id == sourceToLoad.id)
+            }
         } else {
-            clearLoadedSource()
+            if previousSelectedSource != nil || !captures.isEmpty {
+                clearLoadedSource()
+            }
         }
     }
 
@@ -854,6 +869,10 @@ final class AppStore {
         destinationAvailabilityTask?.cancel()
         destinationAvailabilityGeneration += 1
         let generation = destinationAvailabilityGeneration
+        if refreshDependents {
+            duplicateDetectionTask?.cancel()
+            duplicateDetectionGeneration += 1
+        }
 
         guard let destinationURL else {
             destinationAvailabilityTask = nil
@@ -864,7 +883,6 @@ final class AppStore {
         destinationAvailability = .checking
         if refreshDependents {
             refreshDestinationCapacity()
-            refreshDuplicateStates()
         }
 
         let availabilityTask = Task.detached(priority: .utility) {
@@ -976,12 +994,17 @@ final class AppStore {
         }
         let generation = duplicateDetectionGeneration
 
+        if destinationAvailability == .checking {
+            return
+        }
+
         guard let destinationURL, destinationAvailability.isReachable else {
-            if destinationAvailability != .checking {
-                automaticImportSourceID = nil
-            }
+            automaticImportSourceID = nil
+            let hadDuplicateStates = !duplicateStatesByCaptureID.isEmpty
             duplicateStatesByCaptureID = [:]
-            refreshCaptureRows(with: [:])
+            if hadDuplicateStates {
+                refreshCaptureRows(with: [:])
+            }
             captureSelection.updateDuplicateStates([:])
             publishCaptureSelection()
             if preselectNonDuplicates {
@@ -997,7 +1020,25 @@ final class AppStore {
         let cameraName = selectedSource?.displayName ?? "Imports"
 
         duplicateDetectionTask = Task.detached { [weak self] in
-            let states = await resolver(capturesSnapshot, destinationURL, organizationMode, cameraName)
+            let states: [String: CaptureDuplicateState]
+            if let resolver {
+                states = await resolver(capturesSnapshot, destinationURL, organizationMode, cameraName)
+            } else if let builtIndex = try? DestinationFingerprintIndex.buildForImportDestinations(
+                captures: capturesSnapshot,
+                destinationRoot: destinationURL,
+                organizationMode: organizationMode,
+                cameraName: cameraName
+            ) {
+                var resolvedStates: [String: CaptureDuplicateState] = [:]
+                resolvedStates.reserveCapacity(capturesSnapshot.count)
+                for capture in capturesSnapshot {
+                    if Task.isCancelled { return }
+                    resolvedStates[capture.id] = builtIndex.duplicateState(for: capture)
+                }
+                states = resolvedStates
+            } else {
+                states = [:]
+            }
             if Task.isCancelled { return }
             let rows = capturesSnapshot.map { capture in
                 CaptureRowPresentation(
@@ -1026,8 +1067,12 @@ final class AppStore {
             return
         }
 
+        let statesChanged = states != duplicateStatesByCaptureID
         duplicateStatesByCaptureID = states
-        captureRows = rows
+        if statesChanged {
+            captureRows = rows
+            captureRowsRevision &+= 1
+        }
         captureSelection.updateDuplicateStates(states)
         publishCaptureSelection()
         if preselectNonDuplicates {
@@ -1119,14 +1164,16 @@ final class AppStore {
             currentCaptureName: capturesSnapshot.first?.displayName
         )
 
+        let progressThrottler = ImportProgressThrottler()
         let progressHandler: ImportProgressHandler = { [weak self] progress in
+            guard progressThrottler.shouldPublish(progress) else { return }
             Task { @MainActor [weak self] in
-                    guard
-                        let self,
-                        generation == self.importGeneration,
-                        self.activeImportGeneration == generation,
-                        self.isImporting
-                    else {
+                guard
+                    let self,
+                    generation == self.importGeneration,
+                    self.activeImportGeneration == generation,
+                    self.isImporting
+                else {
                     return
                 }
 
@@ -1249,6 +1296,7 @@ final class AppStore {
         captureByID = snapshot.captureByID
         sidecarFilesInSelectedSource = snapshot.sidecarFilesInSelectedSource
         captureRows = snapshot.captureRows
+        captureRowsRevision &+= 1
         captureSelection.updateCaptures(snapshot.captures)
         captureSelection.updateDuplicateStates(duplicateStatesByCaptureID)
         publishCaptureSelection()
@@ -1286,9 +1334,6 @@ final class AppStore {
     }
 
     private func publishCaptureSelection() {
-        if selectedCaptureIDs != captureSelection.ids {
-            selectedCaptureIDs = captureSelection.ids
-        }
         let summary = captureSelection.summary
         if selectedCaptureCount != summary.count {
             selectedCaptureCount = summary.count
@@ -1313,6 +1358,7 @@ final class AppStore {
                 duplicateState: states[capture.id] ?? duplicateState
             )
         }
+        captureRowsRevision &+= 1
     }
 
     private func mergeSources(

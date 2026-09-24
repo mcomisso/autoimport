@@ -97,8 +97,8 @@ struct CaptureListView: View {
                 .padding(16)
             }
         }
-        .onChange(of: store.captureRows, initial: true) { _, rows in
-            refreshSortedRows(from: rows, sortOrder: sortOrder)
+        .onChange(of: store.captureRowsRevision, initial: true) { _, _ in
+            refreshSortedRows(from: store.captureRows, sortOrder: sortOrder)
         }
         .onDisappear {
             sortTask?.cancel()
@@ -161,9 +161,7 @@ struct CaptureListView: View {
         let generation = sortGeneration
 
         guard !sortOrder.isEmpty else {
-            if sortedRows != rows {
-                sortedRows = rows
-            }
+            sortedRows = rows
             return
         }
 
@@ -176,7 +174,7 @@ struct CaptureListView: View {
             }
 
             await MainActor.run {
-                guard sortGeneration == generation, self.sortedRows != sortedRows else {
+                guard sortGeneration == generation else {
                     return
                 }
 

@@ -37,10 +37,17 @@ enum CaptureMetadataReader {
     ]
 
     static func metadata(for fileURL: URL) async -> CaptureMetadata {
+        guard !Task.isCancelled else {
+            return CaptureMetadata(sourceFileName: fileURL.lastPathComponent, rows: [])
+        }
+
         if let imageMetadata = imageMetadata(for: fileURL) {
             return imageMetadata
         }
 
+        guard !Task.isCancelled else {
+            return CaptureMetadata(sourceFileName: fileURL.lastPathComponent, rows: [])
+        }
         return await videoMetadata(for: fileURL)
     }
 
@@ -127,9 +134,12 @@ enum CaptureMetadataReader {
 
         do {
             let metadataItems = try await asset.load(.metadata)
+            try Task.checkCancellation()
             let commonMetadataItems = try await asset.load(.commonMetadata)
+            try Task.checkCancellation()
             let duration = try? await videoDuration(for: asset)
             let pixelSize = try? await videoPixelSize(for: asset)
+            try Task.checkCancellation()
 
             return await metadata(
                 fromVideoMetadata: metadataItems + commonMetadataItems,

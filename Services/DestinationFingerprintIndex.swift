@@ -17,7 +17,10 @@ struct DestinationFingerprintIndex: Sendable {
         cameraName: String,
         fileManager: FileManager = .default
     ) throws -> DestinationFingerprintIndex {
-        try build(
+        let matchingKeys = Set(captures.flatMap(\.memberFiles).map {
+            MetadataKey(name: $0.fileName.lowercased(), size: $0.fileSize)
+        })
+        return try build(
             rootURLs: DestinationImportPlanner.destinationDirectories(
                 for: captures,
                 destinationRoot: destinationRoot,
@@ -25,6 +28,7 @@ struct DestinationFingerprintIndex: Sendable {
                 cameraName: cameraName
             ),
             recursively: false,
+            matchingKeys: matchingKeys,
             fileManager: fileManager
         )
     }
@@ -34,11 +38,30 @@ struct DestinationFingerprintIndex: Sendable {
         recursively: Bool,
         fileManager: FileManager = .default
     ) throws -> DestinationFingerprintIndex {
+        try build(
+            rootURLs: rootURLs,
+            recursively: recursively,
+            matchingKeys: nil,
+            fileManager: fileManager
+        )
+    }
+
+    private static func build(
+        rootURLs: [URL],
+        recursively: Bool,
+        matchingKeys: Set<MetadataKey>?,
+        fileManager: FileManager
+    ) throws -> DestinationFingerprintIndex {
+        guard matchingKeys?.isEmpty != true else {
+            return DestinationFingerprintIndex(filesByKey: [:])
+        }
+
         let resourceKeys: Set<URLResourceKey> = [
             .isRegularFileKey,
             .fileSizeKey,
             .contentModificationDateKey,
         ]
+        let matchingNames = matchingKeys.map { Set($0.map(\.name)) }
         var filesByKey: [MetadataKey: [IndexedDestinationFile]] = [:]
 
         for rootURL in uniqueURLs(rootURLs) {
@@ -46,6 +69,8 @@ struct DestinationFingerprintIndex: Sendable {
                 try indexRecursiveFiles(
                     under: rootURL,
                     resourceKeys: resourceKeys,
+                    matchingKeys: matchingKeys,
+                    matchingNames: matchingNames,
                     fileManager: fileManager,
                     filesByKey: &filesByKey
                 )
@@ -53,6 +78,8 @@ struct DestinationFingerprintIndex: Sendable {
                 try indexImmediateFiles(
                     under: rootURL,
                     resourceKeys: resourceKeys,
+                    matchingKeys: matchingKeys,
+                    matchingNames: matchingNames,
                     fileManager: fileManager,
                     filesByKey: &filesByKey
                 )
@@ -65,12 +92,14 @@ struct DestinationFingerprintIndex: Sendable {
     private static func indexRecursiveFiles(
         under rootURL: URL,
         resourceKeys: Set<URLResourceKey>,
+        matchingKeys: Set<MetadataKey>?,
+        matchingNames: Set<String>?,
         fileManager: FileManager,
         filesByKey: inout [MetadataKey: [IndexedDestinationFile]]
     ) throws {
         guard let enumerator = fileManager.enumerator(
             at: rootURL,
-            includingPropertiesForKeys: Array(resourceKeys),
+            includingPropertiesForKeys: matchingKeys == nil ? Array(resourceKeys) : [],
             options: [.skipsPackageDescendants],
             errorHandler: { _, _ in true }
         ) else {
@@ -79,19 +108,27 @@ struct DestinationFingerprintIndex: Sendable {
 
         for case let fileURL as URL in enumerator {
             try Task.checkCancellation()
-            index(fileURL, resourceKeys: resourceKeys, filesByKey: &filesByKey)
+            index(
+                fileURL,
+                resourceKeys: resourceKeys,
+                matchingKeys: matchingKeys,
+                matchingNames: matchingNames,
+                filesByKey: &filesByKey
+            )
         }
     }
 
     private static func indexImmediateFiles(
         under rootURL: URL,
         resourceKeys: Set<URLResourceKey>,
+        matchingKeys: Set<MetadataKey>?,
+        matchingNames: Set<String>?,
         fileManager: FileManager,
         filesByKey: inout [MetadataKey: [IndexedDestinationFile]]
     ) throws {
         guard let fileURLs = try? fileManager.contentsOfDirectory(
             at: rootURL,
-            includingPropertiesForKeys: Array(resourceKeys),
+            includingPropertiesForKeys: matchingKeys == nil ? Array(resourceKeys) : [],
             options: [.skipsPackageDescendants]
         ) else {
             return
@@ -99,27 +136,54 @@ struct DestinationFingerprintIndex: Sendable {
 
         for fileURL in fileURLs {
             try Task.checkCancellation()
-            index(fileURL, resourceKeys: resourceKeys, filesByKey: &filesByKey)
+            index(
+                fileURL,
+                resourceKeys: resourceKeys,
+                matchingKeys: matchingKeys,
+                matchingNames: matchingNames,
+                filesByKey: &filesByKey
+            )
         }
     }
 
     private static func index(
         _ fileURL: URL,
         resourceKeys: Set<URLResourceKey>,
+        matchingKeys: Set<MetadataKey>?,
+        matchingNames: Set<String>?,
         filesByKey: inout [MetadataKey: [IndexedDestinationFile]]
     ) {
-        guard let values = try? fileURL.resourceValues(forKeys: resourceKeys),
+        let name = fileURL.lastPathComponent.lowercased()
+        if let matchingNames, !matchingNames.contains(name) {
+            return
+        }
+
+        let keysToRead: Set<URLResourceKey> = matchingKeys == nil
+            ? resourceKeys
+            : [.isRegularFileKey, .fileSizeKey]
+        guard let values = try? fileURL.resourceValues(forKeys: keysToRead),
               values.isRegularFile == true
         else {
             return
         }
 
         let size = Int64(values.fileSize ?? 0)
-        let key = MetadataKey(name: fileURL.lastPathComponent.lowercased(), size: size)
+        let key = MetadataKey(name: name, size: size)
+        if let matchingKeys, !matchingKeys.contains(key) {
+            return
+        }
+
+        let modificationDate: Date?
+        if matchingKeys == nil {
+            modificationDate = values.contentModificationDate
+        } else {
+            modificationDate = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate
+        }
         let file = IndexedDestinationFile(
             fileURL: fileURL,
             fileSize: size,
-            modificationDate: values.contentModificationDate
+            modificationDate: modificationDate
         )
         filesByKey[key, default: []].append(file)
     }

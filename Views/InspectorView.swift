@@ -184,6 +184,7 @@ private struct CaptureMetadataSection: View {
     let sourceAsset: SourceAssetFile?
 
     @State private var loadState: MetadataLoadState = .idle
+    private static let cache = CaptureInspectorMetadataCache()
 
     var body: some View {
         GroupBox {
@@ -192,7 +193,7 @@ private struct CaptureMetadataSection: View {
             Text("Metadata")
         }
         .animation(.snappy(duration: 0.24), value: loadState)
-        .task(id: sourceAsset?.id) {
+        .task(id: sourceAsset.map(CaptureInspectorMetadataCache.Key.init(asset:))) {
             await loadMetadata()
         }
     }
@@ -210,10 +211,7 @@ private struct CaptureMetadataSection: View {
             loadState = .loading
         }
 
-        let fileURL = sourceAsset.fileURL
-        let metadata = await Task.detached(priority: .utility) {
-            await CaptureMetadataReader.metadata(for: fileURL)
-        }.value
+        let metadata = await Self.cache.metadata(for: sourceAsset)
 
         guard !Task.isCancelled else {
             return
@@ -222,6 +220,56 @@ private struct CaptureMetadataSection: View {
         withAnimation(.snappy(duration: 0.24)) {
             loadState = .loaded(metadata)
         }
+    }
+}
+
+private actor CaptureInspectorMetadataCache {
+    struct Key: Hashable, Sendable {
+        let path: String
+        let fileSize: Int64
+        let modificationDate: Date
+
+        init(asset: SourceAssetFile) {
+            path = asset.fileURL.standardizedFileURL.path(percentEncoded: false)
+            fileSize = asset.fileSize
+            modificationDate = asset.modificationDate
+        }
+    }
+
+    private let maximumEntryCount = 32
+    private var entries: [Key: CaptureMetadata] = [:]
+    private var recentlyUsedKeys: [Key] = []
+
+    func metadata(for asset: SourceAssetFile) async -> CaptureMetadata {
+        let key = Key(asset: asset)
+        if let cached = entries[key] {
+            markRecentlyUsed(key)
+            return cached
+        }
+
+        let fileURL = asset.fileURL
+        let readTask = Task.detached(priority: .utility) {
+            await CaptureMetadataReader.metadata(for: fileURL)
+        }
+        let metadata = await withTaskCancellationHandler {
+            await readTask.value
+        } onCancel: {
+            readTask.cancel()
+        }
+
+        if !Task.isCancelled {
+            entries[key] = metadata
+            markRecentlyUsed(key)
+            while recentlyUsedKeys.count > maximumEntryCount {
+                entries.removeValue(forKey: recentlyUsedKeys.removeFirst())
+            }
+        }
+        return metadata
+    }
+
+    private func markRecentlyUsed(_ key: Key) {
+        recentlyUsedKeys.removeAll { $0 == key }
+        recentlyUsedKeys.append(key)
     }
 }
 

@@ -211,6 +211,57 @@ struct DestinationFingerprintIndexTests {
         #expect(resolvedPath(index.match(for: sourceAsset)) == resolvedPath(plannedFileURL))
     }
 
+    @Test
+    func importDestinationIndexRetainsOnlySourceCandidates() throws {
+        let sandbox = try makeSandbox()
+        defer { try? FileManager.default.removeItem(at: sandbox.rootURL) }
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+
+        let selectedSourceURL = try sandbox.writeSourceFile(
+            named: "DCIM/CLIP_0010.MP4",
+            data: Data("selected".utf8)
+        )
+        let unrelatedSourceURL = try sandbox.writeSourceFile(
+            named: "DCIM/CLIP_0011.MP4",
+            data: Data("unrelated".utf8)
+        )
+        let selectedDestinationURL = try sandbox.writeDestinationFile(
+            named: "CLIP_0010.MP4",
+            data: Data("selected".utf8)
+        )
+        let unrelatedDestinationURL = try sandbox.writeDestinationFile(
+            named: "CLIP_0011.MP4",
+            data: Data("unrelated".utf8)
+        )
+        for url in [selectedSourceURL, unrelatedSourceURL, selectedDestinationURL, unrelatedDestinationURL] {
+            try setModificationDate(date, for: url)
+        }
+
+        let selectedSource = makeAsset(selectedSourceURL, sourceID: "camera")
+        let unrelatedSource = makeAsset(unrelatedSourceURL, sourceID: "camera")
+        let capture = LogicalCapture(
+            id: "selected",
+            displayName: "CLIP_0010",
+            primaryAsset: selectedSource,
+            memberFiles: [selectedSource],
+            companionFiles: [],
+            multipartSegments: [],
+            totalDuration: nil
+        )
+
+        let importIndex = try DestinationFingerprintIndex.buildForImportDestinations(
+            captures: [capture],
+            destinationRoot: sandbox.destinationURL,
+            organizationMode: .flat,
+            cameraName: "DJI"
+        )
+        let recursiveIndex = try DestinationFingerprintIndex.build(rootURL: sandbox.destinationURL)
+
+        #expect(resolvedPath(importIndex.match(for: selectedSource)) == resolvedPath(selectedDestinationURL))
+        #expect(importIndex.match(for: unrelatedSource) == nil)
+        #expect(resolvedPath(recursiveIndex.match(for: unrelatedSource)) == resolvedPath(unrelatedDestinationURL))
+    }
+
     private func setModificationDate(_ date: Date, for fileURL: URL) throws {
         try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: fileURL.path(percentEncoded: false))
     }

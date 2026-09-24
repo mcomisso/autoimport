@@ -8,6 +8,66 @@ private struct CachedCaptureImage: @unchecked Sendable {
     let estimatedByteCount: Int
 }
 
+private final class CancellableQuickLookRequest: @unchecked Sendable {
+    let request: QLThumbnailGenerator.Request
+
+    init(_ request: QLThumbnailGenerator.Request) {
+        self.request = request
+    }
+}
+
+private final class QuickLookImageContinuation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<NSImage?, Never>?
+    private var isCancelled = false
+
+    func install(_ continuation: CheckedContinuation<NSImage?, Never>) -> Bool {
+        lock.lock()
+        let shouldStart = !isCancelled
+        if shouldStart {
+            self.continuation = continuation
+        }
+        lock.unlock()
+
+        if !shouldStart {
+            continuation.resume(returning: nil)
+        }
+        return shouldStart
+    }
+
+    func finish(with image: NSImage?) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: image)
+    }
+
+    func cancel() {
+        lock.lock()
+        isCancelled = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: nil)
+    }
+
+    var wasCancelled: Bool {
+        lock.lock()
+        let value = isCancelled
+        lock.unlock()
+        return value
+    }
+}
+
+private final class CancellableVideoFrameGenerator: @unchecked Sendable {
+    let generator: AVAssetImageGenerator
+
+    init(_ generator: AVAssetImageGenerator) {
+        self.generator = generator
+    }
+}
+
 private struct CaptureThumbnailPreparedSource: Hashable, Sendable {
     let fileURL: URL
     let canonicalPath: String
@@ -82,24 +142,62 @@ private actor CaptureThumbnailPreviewCache {
     private var images: [Key: CachedCaptureImage] = [:]
     private var recentlyUsedKeys: [Key] = []
     private var totalByteCount = 0
+    private struct InFlightLoad {
+        let id: UUID
+        let task: Task<CachedCaptureImage?, Never>
+        var callers: Set<UUID>
+    }
+    private var inFlightLoads: [Key: InFlightLoad] = [:]
 
     func image(for key: Key, load: @escaping @Sendable () async -> CachedCaptureImage?) async -> CachedCaptureImage? {
+        guard !Task.isCancelled else { return nil }
+
         if let cachedImage = images[key] {
             markRecentlyUsed(key)
             return cachedImage
         }
 
-        let loadedImage = await load()
-
-        if let loadedImage {
-            guard loadedImage.estimatedByteCount <= maximumTotalByteCount else {
-                return nil
-            }
-
-            store(loadedImage, for: key)
+        let callerID = UUID()
+        let inFlight: InFlightLoad
+        if var existing = inFlightLoads[key] {
+            existing.callers.insert(callerID)
+            inFlightLoads[key] = existing
+            inFlight = existing
+        } else {
+            let newLoad = InFlightLoad(id: UUID(), task: Task { await load() }, callers: [callerID])
+            inFlightLoads[key] = newLoad
+            inFlight = newLoad
         }
 
+        let loadedImage = await withTaskCancellationHandler {
+            await inFlight.task.value
+        } onCancel: {
+            Task { await self.removeCaller(callerID, for: key, loadID: inFlight.id) }
+        }
+
+        guard !Task.isCancelled else {
+            removeCaller(callerID, for: key, loadID: inFlight.id)
+            return nil
+        }
+
+        if let loadedImage,
+           loadedImage.estimatedByteCount <= maximumTotalByteCount,
+           inFlightLoads[key]?.id == inFlight.id {
+            store(loadedImage, for: key)
+        }
+        removeCaller(callerID, for: key, loadID: inFlight.id)
         return loadedImage
+    }
+
+    private func removeCaller(_ callerID: UUID, for key: Key, loadID: UUID) {
+        guard var inFlight = inFlightLoads[key], inFlight.id == loadID else { return }
+        inFlight.callers.remove(callerID)
+        if inFlight.callers.isEmpty {
+            inFlightLoads.removeValue(forKey: key)
+            inFlight.task.cancel()
+        } else {
+            inFlightLoads[key] = inFlight
+        }
     }
 
     private func store(_ image: CachedCaptureImage, for key: Key) {
@@ -131,30 +229,36 @@ private actor CaptureThumbnailPreviewCache {
 }
 
 private actor CaptureMediaProcessingLimiter {
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
     private let maximumThumbnailWork = 3
     private let maximumVideoWork = 1
     private var activeThumbnailWork = 0
     private var activeVideoWork = 0
-    private var thumbnailWaiters: [CheckedContinuation<Void, Never>] = []
-    private var videoWaiters: [CheckedContinuation<Void, Never>] = []
+    private var thumbnailWaiters: [Waiter] = []
+    private var videoWaiters: [Waiter] = []
 
     func perform<T: Sendable>(
         kind: MediaProcessingActivityKind,
-        operation: @escaping @Sendable () async -> T
-    ) async -> T {
-        await acquire(kind: kind)
+        operation: @escaping @Sendable () async -> T?
+    ) async -> T? {
+        guard await acquire(kind: kind) else { return nil }
         defer {
             release(kind: kind)
         }
 
+        guard !Task.isCancelled else { return nil }
         return await operation()
     }
 
-    private func acquire(kind: MediaProcessingActivityKind) async {
+    private func acquire(kind: MediaProcessingActivityKind) async -> Bool {
         if kind.isVideoWork {
-            await acquireVideoWork()
+            return await acquireVideoWork()
         } else {
-            await acquireThumbnailWork()
+            return await acquireThumbnailWork()
         }
     }
 
@@ -166,25 +270,55 @@ private actor CaptureMediaProcessingLimiter {
         }
     }
 
-    private func acquireThumbnailWork() async {
+    private func acquireThumbnailWork() async -> Bool {
+        guard !Task.isCancelled else { return false }
         guard activeThumbnailWork >= maximumThumbnailWork else {
             activeThumbnailWork += 1
-            return
+            return true
         }
 
-        await withCheckedContinuation { continuation in
-            thumbnailWaiters.append(continuation)
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                } else {
+                    thumbnailWaiters.append(Waiter(id: id, continuation: continuation))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id, isVideo: false) }
         }
     }
 
-    private func acquireVideoWork() async {
+    private func acquireVideoWork() async -> Bool {
+        guard !Task.isCancelled else { return false }
         guard activeVideoWork >= maximumVideoWork else {
             activeVideoWork += 1
-            return
+            return true
         }
 
-        await withCheckedContinuation { continuation in
-            videoWaiters.append(continuation)
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                } else {
+                    videoWaiters.append(Waiter(id: id, continuation: continuation))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id, isVideo: true) }
+        }
+    }
+
+    private func cancelWaiter(_ id: UUID, isVideo: Bool) {
+        if isVideo {
+            guard let index = videoWaiters.firstIndex(where: { $0.id == id }) else { return }
+            videoWaiters.remove(at: index).continuation.resume(returning: false)
+        } else {
+            guard let index = thumbnailWaiters.firstIndex(where: { $0.id == id }) else { return }
+            thumbnailWaiters.remove(at: index).continuation.resume(returning: false)
         }
     }
 
@@ -192,7 +326,7 @@ private actor CaptureMediaProcessingLimiter {
         if thumbnailWaiters.isEmpty {
             activeThumbnailWork = max(0, activeThumbnailWork - 1)
         } else {
-            thumbnailWaiters.removeFirst().resume()
+            thumbnailWaiters.removeFirst().continuation.resume(returning: true)
         }
     }
 
@@ -200,7 +334,7 @@ private actor CaptureMediaProcessingLimiter {
         if videoWaiters.isEmpty {
             activeVideoWork = max(0, activeVideoWork - 1)
         } else {
-            videoWaiters.removeFirst().resume()
+            videoWaiters.removeFirst().continuation.resume(returning: true)
         }
     }
 }
@@ -531,17 +665,27 @@ struct CaptureThumbnailView: View {
             return nil
         }
 
-        let request = QLThumbnailGenerator.Request(
+        let request = CancellableQuickLookRequest(QLThumbnailGenerator.Request(
             fileAt: source.fileURL,
             size: CGSize(width: CGFloat(key.pointWidth), height: CGFloat(key.pointHeight)),
             scale: CGFloat(key.displayScale),
             representationTypes: .thumbnail
-        )
+        ))
+        let imageContinuation = QuickLookImageContinuation()
 
-        let image = await withCheckedContinuation { continuation in
-            QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
-                continuation.resume(returning: representation?.nsImage)
+        let image = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard imageContinuation.install(continuation) else { return }
+                QLThumbnailGenerator.shared.generateBestRepresentation(for: request.request) { representation, _ in
+                    imageContinuation.finish(with: representation?.nsImage)
+                }
+                if imageContinuation.wasCancelled {
+                    QLThumbnailGenerator.shared.cancel(request.request)
+                }
             }
+        } onCancel: {
+            imageContinuation.cancel()
+            QLThumbnailGenerator.shared.cancel(request.request)
         }
 
         guard !Task.isCancelled, let image else {
@@ -579,10 +723,16 @@ struct CaptureThumbnailView: View {
         )
         generator.requestedTimeToleranceBefore = CMTime(seconds: 0.75, preferredTimescale: 600)
         generator.requestedTimeToleranceAfter = CMTime(seconds: 0.75, preferredTimescale: 600)
+        let cancellableGenerator = CancellableVideoFrameGenerator(generator)
 
         do {
             let requestedTime = await videoFrameTime(for: asset)
-            let generatedFrame = try await generator.image(at: requestedTime)
+            guard !Task.isCancelled else { return nil }
+            let generatedFrame = try await withTaskCancellationHandler {
+                try await cancellableGenerator.generator.image(at: requestedTime)
+            } onCancel: {
+                cancellableGenerator.generator.cancelAllCGImageGeneration()
+            }
             guard !Task.isCancelled else {
                 return nil
             }
