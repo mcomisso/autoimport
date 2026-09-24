@@ -1,17 +1,22 @@
 import Foundation
 
+struct KnownVolume: Codable, Identifiable, Hashable, Sendable {
+    let id: String
+    var displayName: String
+    var automaticImportEnabled: Bool
+}
+
 struct UserPreferences {
     private enum Key {
         static let destinationPath = "lastDestinationPath"
         static let organizationMode = "destinationOrganizationMode"
         static let showHelperFiles = "showHelperFiles"
-        static let automaticallyImportDetectedMedia = "automaticallyImportDetectedMedia"
+        static let knownVolumes = "knownVolumes"
     }
 
     private enum Default {
         static let organizationMode = DestinationOrganizationMode.flat
         static let showHelperFiles = false
-        static let automaticallyImportDetectedMedia = false
     }
 
     private let userDefaults: UserDefaults
@@ -59,15 +64,20 @@ struct UserPreferences {
         userDefaults.set(showHelperFiles, forKey: Key.showHelperFiles)
     }
 
-    func automaticallyImportDetectedMedia() -> Bool {
-        bool(
-            forKey: Key.automaticallyImportDetectedMedia,
-            defaultValue: Default.automaticallyImportDetectedMedia
-        )
+    func knownVolumes() -> [KnownVolume] {
+        guard let data = userDefaults.data(forKey: Key.knownVolumes) else {
+            return []
+        }
+
+        return (try? JSONDecoder().decode([KnownVolume].self, from: data)) ?? []
     }
 
-    func saveAutomaticallyImportDetectedMedia(_ automaticallyImportDetectedMedia: Bool) {
-        userDefaults.set(automaticallyImportDetectedMedia, forKey: Key.automaticallyImportDetectedMedia)
+    func saveKnownVolumes(_ volumes: [KnownVolume]) {
+        guard let data = try? JSONEncoder().encode(volumes) else {
+            return
+        }
+
+        userDefaults.set(data, forKey: Key.knownVolumes)
     }
 
     private func bool(forKey key: String, defaultValue: Bool) -> Bool {

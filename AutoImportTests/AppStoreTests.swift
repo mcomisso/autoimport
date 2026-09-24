@@ -102,6 +102,14 @@ struct AppStoreTests {
             subtitle: "Mounted",
             state: .ready
         )
+        let secondMountedSource = SourceDevice(
+            id: "volume-b",
+            displayName: "DJI Camera",
+            kind: .mountedVolume,
+            rootURL: URL(fileURLWithPath: "/Volumes/DJI 1"),
+            subtitle: "Mounted",
+            state: .ready
+        )
 
         let imageCaptureOnlyStore = AppStore(
             discoverVolumeSources: { [] },
@@ -119,7 +127,7 @@ struct AppStoreTests {
         #expect(imageCaptureOnlyStore.sources.map(\.id) == ["image-capture-a"])
 
         let mountedVolumeStore = AppStore(
-            discoverVolumeSources: { [mountedSource] },
+            discoverVolumeSources: { [mountedSource, secondMountedSource] },
             discoverImageCaptureSources: { [firstImageCaptureSource, secondImageCaptureSource] },
             scanSource: { _ in [] },
             groupAssets: { _ in CaptureGroupingResult(captures: [], unknownFolders: []) },
@@ -131,7 +139,7 @@ struct AppStoreTests {
         mountedVolumeStore.refreshSources()
         await mountedVolumeStore.awaitSourceRefresh()
 
-        #expect(mountedVolumeStore.sources.map(\.id) == ["volume"])
+        #expect(Set(mountedVolumeStore.sources.map(\.id)) == ["volume", "volume-b"])
     }
 
     @Test
@@ -252,7 +260,7 @@ struct AppStoreTests {
     }
 
     @Test
-    func persistsAutomaticImportPreferenceAcrossStoreInstances() {
+    func persistsAutomaticImportChoiceForOneKnownVolume() async {
         let suiteName = "AppStoreTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer {
@@ -260,10 +268,12 @@ struct AppStoreTests {
         }
 
         let preferences = UserPreferences(userDefaults: defaults)
+        let enabledSource = makeMountedSource(id: "volume-a", volumeID: "uuid-a")
+        let otherSource = makeMountedSource(id: "volume-b", volumeID: "uuid-b")
 
         let store = AppStore(
             preferences: preferences,
-            discoverVolumeSources: { [] },
+            discoverVolumeSources: { [enabledSource, otherSource] },
             discoverImageCaptureSources: { [] },
             scanSource: { _ in [] },
             groupAssets: { _ in CaptureGroupingResult(captures: [], unknownFolders: []) },
@@ -272,9 +282,12 @@ struct AppStoreTests {
             deleteCaptureFilesAction: { _ in }
         )
 
-        #expect(store.automaticallyImportDetectedMedia == false)
+        store.refreshSources()
+        await store.awaitSourceRefresh()
+        #expect(store.knownVolumes.count == 2)
+        #expect(store.knownVolumes.allSatisfy { !$0.automaticImportEnabled })
 
-        store.automaticallyImportDetectedMedia = true
+        store.setAutomaticImportEnabled(true, forVolumeID: "uuid-a")
 
         let reloadedStore = AppStore(
             preferences: preferences,
@@ -287,69 +300,57 @@ struct AppStoreTests {
             deleteCaptureFilesAction: { _ in }
         )
 
-        #expect(reloadedStore.automaticallyImportDetectedMedia == true)
+        #expect(reloadedStore.knownVolumes.first(where: { $0.id == "uuid-a" })?.automaticImportEnabled == true)
+        #expect(reloadedStore.knownVolumes.first(where: { $0.id == "uuid-b" })?.automaticImportEnabled == false)
     }
 
     @Test
-    func automaticImportDoesNotRunByDefaultForDetectedMountedMedia() async throws {
+    func previouslyEnabledGlobalPreferenceDoesNotImportOnLaunchOrMount() async throws {
         let suiteName = "AppStoreTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer {
             defaults.removePersistentDomain(forName: suiteName)
         }
+        defaults.set(true, forKey: "automaticallyImportDetectedMedia")
 
-        let source = SourceDevice(
-            id: "volume",
-            displayName: "DJI Camera",
-            kind: .mountedVolume,
-            rootURL: URL(fileURLWithPath: "/Volumes/DJI"),
-            subtitle: "Mounted",
-            state: .ready
-        )
+        let source = makeMountedSource(id: "volume", volumeID: "uuid-a")
         let capture = makeCapture(id: "unique")
-        let scanAttemptCount = LockedTestValue(0)
         let importAttemptCount = LockedTestValue(0)
-        let store = AppStore(
+        let store = makeAutomaticImportStore(
             preferences: UserPreferences(userDefaults: defaults),
-            discoverVolumeSources: { [source] },
-            discoverImageCaptureSources: { [] },
-            scanSource: { _ in
-                scanAttemptCount.update { $0 += 1 }
-                return []
-            },
-            groupAssets: { _ in CaptureGroupingResult(captures: [capture], unknownFolders: []) },
-            duplicateStateResolver: { _, _, _, _ in [:] },
-            importCapturesAction: { _, _, _, _, _, _ in
-                importAttemptCount.update { $0 += 1 }
-                return ImportSessionResult(captureResults: [])
-            },
-            deleteCaptureFilesAction: { _ in }
+            source: source,
+            capture: capture,
+            importAttemptCount: importAttemptCount
         )
 
         let destinationURL = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: destinationURL) }
 
         store.destinationURL = destinationURL
-        store.refreshSourcesAndLoadPreferredSource(preferNewDetectedMedia: true)
+        store.refreshSourcesAndLoadPreferredSource()
         await store.awaitDuplicateDetection()
         await store.awaitAutomaticImport()
 
-        #expect(store.automaticallyImportDetectedMedia == false)
+        #expect(store.knownVolumes.first?.automaticImportEnabled == false)
         #expect(store.selectedSource == nil)
-        #expect(scanAttemptCount.get() == 0)
+        #expect(importAttemptCount.get() == 0)
+
+        store.refreshSourcesAndLoadPreferredSource(preferNewDetectedMedia: true)
+        await store.awaitDuplicateDetection()
+        await store.awaitAutomaticImport()
         #expect(importAttemptCount.get() == 0)
     }
 
     @Test
     func automaticImportOnlyImportsUniqueCapturesFromDetectedMountedMedia() async throws {
-        let source = SourceDevice(
-            id: "volume",
-            displayName: "DJI Camera",
-            kind: .mountedVolume,
-            rootURL: URL(fileURLWithPath: "/Volumes/DJI"),
-            subtitle: "Mounted",
-            state: .ready
-        )
+        let suiteName = "AppStoreTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let preferences = UserPreferences(userDefaults: defaults)
+        preferences.saveKnownVolumes([
+            KnownVolume(id: "uuid-a", displayName: "DJI Camera", automaticImportEnabled: true)
+        ])
+        let source = makeMountedSource(id: "volume", volumeID: "uuid-a")
         let uniqueCapture = makeCapture(id: "unique")
         let partialCapture = makeCapture(id: "partial")
         let duplicateCapture = makeCapture(id: "duplicate")
@@ -357,6 +358,7 @@ struct AppStoreTests {
         let overwriteValues = LockedTestValue<[Bool]>([])
         let importAttemptCount = LockedTestValue(0)
         let store = AppStore(
+            preferences: preferences,
             discoverVolumeSources: { [source] },
             discoverImageCaptureSources: { [] },
             scanSource: { _ in [] },
@@ -401,13 +403,21 @@ struct AppStoreTests {
         defer { try? FileManager.default.removeItem(at: destinationURL) }
 
         store.destinationURL = destinationURL
-        store.automaticallyImportDetectedMedia = true
-        store.refreshSourcesAndLoadPreferredSource(preferNewDetectedMedia: true)
+        store.refreshSources()
+        await store.awaitSourceRefresh()
+        store.refreshSourcesAndLoadPreferredSource(
+            preferNewDetectedMedia: true,
+            mountedVolumeURL: source.rootURL
+        )
         await store.awaitDuplicateDetection()
         await store.awaitAutomaticImport()
         await store.awaitDuplicateDetection()
         await store.awaitAutomaticImport()
 
+        #expect(store.selectedSource?.id == source.id)
+        #expect(store.knownVolumes.first?.automaticImportEnabled == true)
+        #expect(store.destinationAvailability == .reachable)
+        #expect(store.captureIDs == ["unique", "partial", "duplicate"])
         #expect(importAttemptCount.get() == 1)
         #expect(importedCaptureIDs.get() == ["unique"])
         #expect(overwriteValues.get() == [false])
@@ -415,7 +425,138 @@ struct AppStoreTests {
     }
 
     @Test
+    func unknownVolumeIsListedButNeverAutoImports() async throws {
+        let suiteName = "AppStoreTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let preferences = UserPreferences(userDefaults: defaults)
+        preferences.saveKnownVolumes([
+            KnownVolume(id: "uuid-a", displayName: "Other Camera", automaticImportEnabled: true)
+        ])
+
+        let source = makeMountedSource(id: "volume-b", volumeID: "uuid-b")
+        let importAttemptCount = LockedTestValue(0)
+        let store = makeAutomaticImportStore(
+            preferences: preferences,
+            source: source,
+            capture: makeCapture(id: "unique"),
+            importAttemptCount: importAttemptCount
+        )
+        let destinationURL = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destinationURL) }
+
+        store.destinationURL = destinationURL
+        store.refreshSourcesAndLoadPreferredSource(preferNewDetectedMedia: true)
+        await store.awaitDuplicateDetection()
+        await store.awaitAutomaticImport()
+
+        #expect(store.sources.map(\.id) == [source.id])
+        #expect(store.knownVolumes.first(where: { $0.id == "uuid-b" })?.automaticImportEnabled == false)
+        #expect(store.selectedSource == nil)
+        #expect(importAttemptCount.get() == 0)
+    }
+
+    @Test
+    func volumeWithoutPersistentIDNeverAutoImports() async throws {
+        let suiteName = "AppStoreTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let preferences = UserPreferences(userDefaults: defaults)
+        defaults.set(true, forKey: "automaticallyImportDetectedMedia")
+
+        let source = makeMountedSource(id: "volume::/Volumes/DJI", volumeID: nil)
+        let importAttemptCount = LockedTestValue(0)
+        let store = makeAutomaticImportStore(
+            preferences: preferences,
+            source: source,
+            capture: makeCapture(id: "unique"),
+            importAttemptCount: importAttemptCount
+        )
+        let destinationURL = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destinationURL) }
+
+        store.destinationURL = destinationURL
+        store.refreshSourcesAndLoadPreferredSource(preferNewDetectedMedia: true)
+        await store.awaitDuplicateDetection()
+        await store.awaitAutomaticImport()
+
+        #expect(store.sources.map(\.id) == [source.id])
+        #expect(store.knownVolumes.isEmpty)
+        #expect(store.selectedSource == nil)
+        #expect(importAttemptCount.get() == 0)
+    }
+
+    @Test
+    func manuallyBrowsingOptedInVolumeDoesNotAutoImport() async throws {
+        let suiteName = "AppStoreTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let preferences = UserPreferences(userDefaults: defaults)
+        preferences.saveKnownVolumes([
+            KnownVolume(id: "uuid-a", displayName: "DJI Camera", automaticImportEnabled: true)
+        ])
+
+        let source = makeMountedSource(id: "volume-a", volumeID: "uuid-a")
+        let importAttemptCount = LockedTestValue(0)
+        let store = makeAutomaticImportStore(
+            preferences: preferences,
+            source: source,
+            capture: makeCapture(id: "unique"),
+            importAttemptCount: importAttemptCount
+        )
+        let destinationURL = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destinationURL) }
+
+        store.destinationURL = destinationURL
+        store.refreshSources()
+        await store.awaitSourceRefresh()
+        store.loadSource(source)
+        await store.awaitDuplicateDetection()
+        await store.awaitAutomaticImport()
+
+        #expect(store.selectedSource?.id == source.id)
+        #expect(store.captureIDs == ["unique"])
+        #expect(store.knownVolumes.first?.automaticImportEnabled == true)
+        #expect(importAttemptCount.get() == 0)
+    }
+
+    @Test
+    func optedInVolumeAlreadyMountedAtLaunchDoesNotAutoImport() async throws {
+        let suiteName = "AppStoreTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let preferences = UserPreferences(userDefaults: defaults)
+        preferences.saveKnownVolumes([
+            KnownVolume(id: "uuid-a", displayName: "DJI Camera", automaticImportEnabled: true)
+        ])
+
+        let source = makeMountedSource(id: "volume-a", volumeID: "uuid-a")
+        let importAttemptCount = LockedTestValue(0)
+        let store = makeAutomaticImportStore(
+            preferences: preferences,
+            source: source,
+            capture: makeCapture(id: "unique"),
+            importAttemptCount: importAttemptCount
+        )
+        let destinationURL = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destinationURL) }
+
+        store.destinationURL = destinationURL
+        store.refreshSourcesAndLoadPreferredSource()
+        await store.awaitDuplicateDetection()
+        await store.awaitAutomaticImport()
+
+        #expect(store.sources.map(\.id) == [source.id])
+        #expect(store.knownVolumes.first?.automaticImportEnabled == true)
+        #expect(store.selectedSource == nil)
+        #expect(importAttemptCount.get() == 0)
+    }
+
+    @Test
     func automaticImportIgnoresManualFolderSources() async throws {
+        let suiteName = "AppStoreTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
         let sourceURL = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: sourceURL) }
         let folderSource = SourceDevice(
@@ -429,6 +570,7 @@ struct AppStoreTests {
         let capture = makeCapture(id: "unique")
         let importAttemptCount = LockedTestValue(0)
         let store = AppStore(
+            preferences: UserPreferences(userDefaults: defaults),
             discoverVolumeSources: { [] },
             discoverImageCaptureSources: { [] },
             scanSource: { _ in [] },
@@ -445,7 +587,6 @@ struct AppStoreTests {
         defer { try? FileManager.default.removeItem(at: destinationURL) }
 
         store.destinationURL = destinationURL
-        store.automaticallyImportDetectedMedia = true
         store.addFolderSource(folderSource.rootURL!)
         await store.awaitDuplicateDetection()
         await store.awaitAutomaticImport()
@@ -1246,6 +1387,39 @@ struct AppStoreTests {
         #expect(!tracker.hasActiveWork)
         #expect(tracker.activeActivityCount == 0)
         #expect(tracker.toolbarStatusText.isEmpty)
+    }
+
+    nonisolated private func makeMountedSource(id: String, volumeID: String?) -> SourceDevice {
+        SourceDevice(
+            id: id,
+            displayName: "DJI Camera",
+            kind: .mountedVolume,
+            rootURL: URL(fileURLWithPath: "/Volumes/DJI"),
+            subtitle: "Mounted",
+            state: .ready,
+            persistentVolumeID: volumeID
+        )
+    }
+
+    private func makeAutomaticImportStore(
+        preferences: UserPreferences,
+        source: SourceDevice,
+        capture: LogicalCapture,
+        importAttemptCount: LockedTestValue<Int>
+    ) -> AppStore {
+        AppStore(
+            preferences: preferences,
+            discoverVolumeSources: { [source] },
+            discoverImageCaptureSources: { [] },
+            scanSource: { _ in [] },
+            groupAssets: { _ in CaptureGroupingResult(captures: [capture], unknownFolders: []) },
+            duplicateStateResolver: { _, _, _, _ in [:] },
+            importCapturesAction: { _, _, _, _, _, _ in
+                importAttemptCount.update { $0 += 1 }
+                return ImportSessionResult(captureResults: [])
+            },
+            deleteCaptureFilesAction: { _ in }
+        )
     }
 
     nonisolated private func makeCapture(id: String, memberFiles: [SourceAssetFile] = []) -> LogicalCapture {

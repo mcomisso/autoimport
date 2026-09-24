@@ -169,13 +169,6 @@ struct CaptureRowPresentation: Identifiable, Hashable, Sendable {
     }
 }
 
-private struct AutomaticImportAttemptKey: Hashable, Sendable {
-    let sourceID: String
-    let destinationPath: String
-    let organizationModeRawValue: String
-    let captureIDs: [String]
-}
-
 private struct CaptureCacheSnapshot: Sendable {
     let captures: [LogicalCapture]
     let captureIDs: [String]
@@ -250,10 +243,9 @@ final class AppStore {
     private var sourceLoadingGeneration = 0
     private var duplicateDetectionTask: Task<Void, Never>?
     private var duplicateDetectionGeneration = 0
-    private var duplicateStatesAreResolved = false
     private var pendingNonDuplicatePreselection = false
     private var automaticImportTask: Task<Void, Never>?
-    private var lastAutomaticImportAttemptKey: AutomaticImportAttemptKey?
+    private var automaticImportSourceID: String?
     private var importWorkerTask: Task<ImportSessionResult, Never>?
     private var importGeneration = 0
     private var activeImportGeneration: Int?
@@ -268,6 +260,7 @@ final class AppStore {
     @ObservationIgnored private var captureSelection = CaptureSelection()
 
     var sources: [SourceDevice] = []
+    private(set) var knownVolumes: [KnownVolume] = []
     var selectedSource: SourceDevice?
     var captures: [LogicalCapture] = [] {
         didSet {
@@ -301,16 +294,6 @@ final class AppStore {
     var showHelperFiles: Bool {
         didSet {
             preferences.saveShowHelperFiles(showHelperFiles)
-        }
-    }
-    var automaticallyImportDetectedMedia: Bool {
-        didSet {
-            preferences.saveAutomaticallyImportDetectedMedia(automaticallyImportDetectedMedia)
-            if automaticallyImportDetectedMedia {
-                scheduleAutomaticImportForCurrentSource()
-            } else {
-                lastAutomaticImportAttemptKey = nil
-            }
         }
     }
     var destinationURL: URL? {
@@ -391,8 +374,17 @@ final class AppStore {
         self.destinationURL = preferences.destinationURL()
         self.organizationMode = preferences.organizationMode()
         self.showHelperFiles = preferences.showHelperFiles()
-        self.automaticallyImportDetectedMedia = preferences.automaticallyImportDetectedMedia()
+        self.knownVolumes = preferences.knownVolumes()
         refreshDestinationAvailability()
+    }
+
+    func setAutomaticImportEnabled(_ enabled: Bool, forVolumeID id: String) {
+        guard let index = knownVolumes.firstIndex(where: { $0.id == id }) else { return }
+        knownVolumes[index].automaticImportEnabled = enabled
+        preferences.saveKnownVolumes(knownVolumes)
+        if !enabled, selectedSource?.persistentVolumeID == id {
+            automaticImportSourceID = nil
+        }
     }
 
     var selectedCaptures: [LogicalCapture] {
@@ -478,30 +470,35 @@ final class AppStore {
             selectFirstIfNeeded: selectFirstIfNeeded,
             fallbackToFirstWhenSelectedUnavailable: fallbackToFirstWhenSelectedUnavailable,
             preferNewDetectedMedia: false,
+            mountedVolumeURL: nil,
             previousSourceIDs: [],
             loadPreferredSourceAfterRefresh: false
         )
     }
 
-    func refreshSourcesAndLoadPreferredSource(preferNewDetectedMedia: Bool = false) {
+    func refreshSourcesAndLoadPreferredSource(
+        preferNewDetectedMedia: Bool = false,
+        mountedVolumeURL: URL? = nil
+    ) {
         let previousSourceIDs = Set(sources.map(\.id))
 
         scheduleSourceRefresh(
             selectFirstIfNeeded: false,
             fallbackToFirstWhenSelectedUnavailable: false,
             preferNewDetectedMedia: preferNewDetectedMedia,
+            mountedVolumeURL: mountedVolumeURL,
             previousSourceIDs: previousSourceIDs,
             loadPreferredSourceAfterRefresh: true
         )
     }
 
-    func loadSource(_ source: SourceDevice) {
+    func loadSource(_ source: SourceDevice, automaticImportOnLoad: Bool = false) {
         sourceLoadingTask?.cancel()
         sourceLoadingGeneration += 1
         duplicateDetectionTask?.cancel()
         duplicateDetectionGeneration += 1
         cancelActiveImport(resetProgress: true)
-        lastAutomaticImportAttemptKey = nil
+        automaticImportSourceID = automaticImportOnLoad ? source.id : nil
         let generation = sourceLoadingGeneration
 
         selectedSource = source
@@ -513,7 +510,6 @@ final class AppStore {
         lastImportResult = nil
         replaceSelectedCaptureIDs([])
         duplicateStatesByCaptureID = [:]
-        duplicateStatesAreResolved = false
 
         let scanSource = scanSource
         let groupAssets = groupAssets
@@ -762,6 +758,7 @@ final class AppStore {
         selectFirstIfNeeded: Bool,
         fallbackToFirstWhenSelectedUnavailable: Bool,
         preferNewDetectedMedia: Bool,
+        mountedVolumeURL: URL?,
         previousSourceIDs: Set<String>,
         loadPreferredSourceAfterRefresh: Bool
     ) {
@@ -786,6 +783,7 @@ final class AppStore {
                 selectFirstIfNeeded: selectFirstIfNeeded,
                 fallbackToFirstWhenSelectedUnavailable: fallbackToFirstWhenSelectedUnavailable,
                 preferNewDetectedMedia: preferNewDetectedMedia,
+                mountedVolumeURL: mountedVolumeURL,
                 previousSourceIDs: previousSourceIDs,
                 loadPreferredSourceAfterRefresh: loadPreferredSourceAfterRefresh
             )
@@ -800,6 +798,7 @@ final class AppStore {
         selectFirstIfNeeded: Bool,
         fallbackToFirstWhenSelectedUnavailable: Bool,
         preferNewDetectedMedia: Bool,
+        mountedVolumeURL: URL?,
         previousSourceIDs: Set<String>,
         loadPreferredSourceAfterRefresh: Bool
     ) {
@@ -815,10 +814,16 @@ final class AppStore {
         let previousSelectedSource = selectedSource
 
         sources = combined
+        rememberVolumes(in: volumeSources)
 
         if let previousSelectedSource {
             selectedSource = combined.first(where: { $0.id == previousSelectedSource.id })
-                ?? combined.first(where: { normalizedName($0.displayName) == normalizedName(previousSelectedSource.displayName) })
+                ?? combined.first(where: { candidate in
+                    let sameName = normalizedName(candidate.displayName)
+                        == normalizedName(previousSelectedSource.displayName)
+                    return sameName && (previousSelectedSource.kind != .mountedVolume
+                        || candidate.kind == .imageCaptureDevice)
+                })
                 ?? (fallbackToFirstWhenSelectedUnavailable ? combined.first : nil)
         } else {
             selectedSource = selectFirstIfNeeded ? combined.first : nil
@@ -830,14 +835,16 @@ final class AppStore {
 
         let newDetectedMedia = sources.first { source in
             preferNewDetectedMedia
-                && automaticallyImportDetectedMedia
-                && !previousSourceIDs.contains(source.id)
+                && (mountedVolumeURL.map { mountedURL in
+                    source.rootURL?.standardizedFileURL == mountedURL.standardizedFileURL
+                } ?? !previousSourceIDs.contains(source.id))
                 && isAutomaticImportSource(source)
+                && isAutomaticImportEnabled(for: source)
         }
         let sourceToLoad = newDetectedMedia ?? selectedSource
 
         if let sourceToLoad {
-            loadSource(sourceToLoad)
+            loadSource(sourceToLoad, automaticImportOnLoad: newDetectedMedia?.id == sourceToLoad.id)
         } else {
             clearLoadedSource()
         }
@@ -902,8 +909,8 @@ final class AppStore {
         sourceLoadingGeneration += 1
         duplicateDetectionTask?.cancel()
         duplicateDetectionGeneration += 1
-        duplicateStatesAreResolved = false
         cancelActiveImport(resetProgress: true)
+        automaticImportSourceID = nil
 
         selectedSource = nil
         isLoadingSource = false
@@ -964,13 +971,15 @@ final class AppStore {
     private func refreshDuplicateStates(preselectNonDuplicates: Bool = false) {
         duplicateDetectionTask?.cancel()
         duplicateDetectionGeneration += 1
-        duplicateStatesAreResolved = false
         if preselectNonDuplicates {
             pendingNonDuplicatePreselection = true
         }
         let generation = duplicateDetectionGeneration
 
         guard let destinationURL, destinationAvailability.isReachable else {
+            if destinationAvailability != .checking {
+                automaticImportSourceID = nil
+            }
             duplicateStatesByCaptureID = [:]
             refreshCaptureRows(with: [:])
             captureSelection.updateDuplicateStates([:])
@@ -1018,7 +1027,6 @@ final class AppStore {
         }
 
         duplicateStatesByCaptureID = states
-        duplicateStatesAreResolved = true
         captureRows = rows
         captureSelection.updateDuplicateStates(states)
         publishCaptureSelection()
@@ -1034,29 +1042,20 @@ final class AppStore {
         )
     }
 
-    private func scheduleAutomaticImportForCurrentSource() {
-        guard duplicateStatesAreResolved else {
-            return
-        }
-
-        scheduleAutomaticImportIfNeeded(
-            capturesSnapshot: captures,
-            states: duplicateStatesByCaptureID
-        )
-    }
-
     private func scheduleAutomaticImportIfNeeded(
         capturesSnapshot: [LogicalCapture],
         states: [String: CaptureDuplicateState]
     ) {
+        guard let source = selectedSource, automaticImportSourceID == source.id else { return }
+        automaticImportSourceID = nil
+
         guard
-            automaticallyImportDetectedMedia,
             automaticImportTask == nil,
             !isImporting,
-            let source = selectedSource,
+            isAutomaticImportEnabled(for: source),
             source.kind == .mountedVolume,
             source.rootURL != nil,
-            let destinationURL,
+            destinationURL != nil,
             destinationAvailability.isReachable
         else {
             return
@@ -1069,18 +1068,11 @@ final class AppStore {
             return
         }
 
-        let key = AutomaticImportAttemptKey(
-            sourceID: source.id,
-            destinationPath: destinationURL.standardizedFileURL.path(percentEncoded: false),
-            organizationModeRawValue: organizationMode.rawValue,
-            captureIDs: importableCaptures.map(\.id)
-        )
-        guard key != lastAutomaticImportAttemptKey else {
-            return
-        }
-
-        lastAutomaticImportAttemptKey = key
         automaticImportTask = Task { [weak self] in
+            guard self?.isAutomaticImportEnabled(for: source) == true else {
+                self?.automaticImportTask = nil
+                return
+            }
             await self?.importCaptures(
                 importableCaptures,
                 from: source,
@@ -1328,20 +1320,48 @@ final class AppStore {
         imageCaptureSources: [SourceDevice],
         folderSources: [SourceDevice]
     ) -> [SourceDevice] {
-        var mergedByName: [String: SourceDevice] = [:]
+        var imageCaptureByName: [String: SourceDevice] = [:]
         for imageCaptureSource in imageCaptureSources {
             let name = normalizedName(imageCaptureSource.displayName)
-            if mergedByName[name] == nil {
-                mergedByName[name] = imageCaptureSource
+            if imageCaptureByName[name] == nil {
+                imageCaptureByName[name] = imageCaptureSource
             }
         }
 
         for volumeSource in volumeSources {
-            mergedByName[normalizedName(volumeSource.displayName)] = volumeSource
+            imageCaptureByName.removeValue(forKey: normalizedName(volumeSource.displayName))
         }
 
-        let mergedHardwareSources = Array(mergedByName.values).sorted(by: sourceSortOrder)
+        let mergedHardwareSources = (volumeSources + Array(imageCaptureByName.values)).sorted(by: sourceSortOrder)
         return (folderSources + mergedHardwareSources).sorted(by: sourceSortOrder)
+    }
+
+    private func rememberVolumes(in volumeSources: [SourceDevice]) {
+        var updated = knownVolumes
+        for source in volumeSources {
+            guard let id = source.persistentVolumeID else { continue }
+            if let index = updated.firstIndex(where: { $0.id == id }) {
+                updated[index].displayName = source.displayName
+            } else {
+                updated.append(KnownVolume(
+                    id: id,
+                    displayName: source.displayName,
+                    automaticImportEnabled: false
+                ))
+            }
+        }
+        updated.sort {
+            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        }
+        if updated != knownVolumes {
+            knownVolumes = updated
+            preferences.saveKnownVolumes(updated)
+        }
+    }
+
+    private func isAutomaticImportEnabled(for source: SourceDevice) -> Bool {
+        guard let id = source.persistentVolumeID else { return false }
+        return knownVolumes.first(where: { $0.id == id })?.automaticImportEnabled == true
     }
 
     private func sourceSortOrder(_ lhs: SourceDevice, _ rhs: SourceDevice) -> Bool {

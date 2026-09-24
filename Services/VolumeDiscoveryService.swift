@@ -15,6 +15,7 @@ struct VolumeDiscoveryService {
             .volumeIsEjectableKey,
             .volumeIsInternalKey,
             .volumeIsRemovableKey,
+            .volumeUUIDStringKey,
         ]
 
         guard let mountedURLs = fileManager.mountedVolumeURLs(
@@ -40,15 +41,21 @@ struct VolumeDiscoveryService {
             let displayName = values.volumeLocalizedName
                 ?? values.name
                 ?? volumeURL.lastPathComponent
-            let subtitle = isEjectable ? "Ejectable volume" : "Mounted volume"
+            let persistentVolumeID = values.volumeUUIDString.flatMap { $0.isEmpty ? nil : $0 }
+            let subtitle = persistentVolumeID == nil
+                ? "Manual import only (no persistent volume ID)"
+                : (isEjectable ? "Ejectable volume" : "Mounted volume")
+            let sourceID = persistentVolumeID.map { "volume::\($0)" }
+                ?? "volume::\(volumeURL.standardizedFileURL.path(percentEncoded: false))"
 
             return SourceDevice(
-                id: "volume::\(volumeURL.standardizedFileURL.path(percentEncoded: false))",
+                id: sourceID,
                 displayName: displayName,
                 kind: .mountedVolume,
                 rootURL: volumeURL,
                 subtitle: subtitle,
-                state: .ready
+                state: .ready,
+                persistentVolumeID: persistentVolumeID
             )
         }
         .sorted { lhs, rhs in

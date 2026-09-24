@@ -107,11 +107,13 @@ struct ContentView: View {
             guard !isRunningTests else {
                 return
             }
-            refreshSources(preferNewDetectedMedia: true)
+            refreshSources()
         }
         .mountedMediaNotifications(
             isEnabled: !isRunningTests,
-            onMount: { refreshSources(preferNewDetectedMedia: true) },
+            onMount: { mountedURL in
+                refreshSources(preferNewDetectedMedia: true, mountedVolumeURL: mountedURL)
+            },
             onUnmount: { refreshSources() }
         )
         .onChange(of: store.captureIDs) { _, captureIDs in
@@ -153,9 +155,13 @@ struct ContentView: View {
         }
     }
 
-    private func refreshSources(preferNewDetectedMedia: Bool = false) {
+    private func refreshSources(
+        preferNewDetectedMedia: Bool = false,
+        mountedVolumeURL: URL? = nil
+    ) {
         store.refreshSourcesAndLoadPreferredSource(
-            preferNewDetectedMedia: preferNewDetectedMedia
+            preferNewDetectedMedia: preferNewDetectedMedia,
+            mountedVolumeURL: mountedVolumeURL
         )
     }
 
@@ -294,7 +300,7 @@ private struct BackgroundProcessingToolbarIndicator: View {
 
 private struct MountedMediaNotificationsModifier: ViewModifier {
     let isEnabled: Bool
-    let onMount: @MainActor () -> Void
+    let onMount: @MainActor (URL?) -> Void
     let onUnmount: @MainActor () -> Void
 
     func body(content: Content) -> some View {
@@ -304,9 +310,10 @@ private struct MountedMediaNotificationsModifier: ViewModifier {
                     return
                 }
 
-                for await _ in NSWorkspace.shared.notificationCenter.notifications(named: NSWorkspace.didMountNotification) {
+                for await notification in NSWorkspace.shared.notificationCenter.notifications(named: NSWorkspace.didMountNotification) {
+                    let mountedURL = notification.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL
                     await MainActor.run {
-                        onMount()
+                        onMount(mountedURL)
                     }
                 }
             }
@@ -478,7 +485,7 @@ private extension View {
 
     func mountedMediaNotifications(
         isEnabled: Bool,
-        onMount: @escaping @MainActor () -> Void,
+        onMount: @escaping @MainActor (URL?) -> Void,
         onUnmount: @escaping @MainActor () -> Void
     ) -> some View {
         modifier(

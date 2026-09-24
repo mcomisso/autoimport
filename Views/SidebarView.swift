@@ -29,25 +29,44 @@ struct SidebarView: View {
             .padding(.vertical, 12)
 
             List(selection: sourceSelection) {
-                if store.sources.isEmpty {
-                    Label("No cameras or folders", systemImage: "externaldrive.badge.xmark")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(store.sources) { source in
-                        sourceRow(source)
-                            .contextMenu {
-                                SourceContextMenu(
-                                    source: source,
-                                    canEject: store.canEjectSource(source),
-                                    isEjecting: store.ejectingSourceID == source.id,
-                                    onEject: {
-                                        Task {
-                                            await store.ejectSource(source)
+                Section("Connected Sources") {
+                    if store.sources.isEmpty {
+                        Label("No cameras or folders", systemImage: "externaldrive.badge.xmark")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(store.sources) { source in
+                            sourceRow(source)
+                                .contextMenu {
+                                    SourceContextMenu(
+                                        source: source,
+                                        canEject: store.canEjectSource(source),
+                                        isEjecting: store.ejectingSourceID == source.id,
+                                        onEject: {
+                                            Task {
+                                                await store.ejectSource(source)
+                                            }
                                         }
-                                    }
-                                )
-                            }
-                            .tag(source.id)
+                                    )
+                                }
+                                .tag(source.id)
+                        }
+                    }
+                }
+
+                Section("Remembered Volumes") {
+                    if store.knownVolumes.isEmpty {
+                        Text("Connect a volume to set its import behavior.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(store.knownVolumes) { volume in
+                            KnownVolumeRow(
+                                volume: volume,
+                                onChange: { enabled in
+                                    store.setAutomaticImportEnabled(enabled, forVolumeID: volume.id)
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -111,6 +130,43 @@ struct SidebarView: View {
         case .folderBookmark:
             return .teal
         }
+    }
+}
+
+private struct KnownVolumeRow: View {
+    let volume: KnownVolume
+    let onChange: @MainActor @Sendable (Bool) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: "externaldrive")
+                    .foregroundStyle(.secondary)
+
+                Text(volume.displayName)
+                    .lineLimit(1)
+
+                Spacer(minLength: 0)
+
+                Toggle("Auto Import", isOn: Binding(
+                    get: { volume.automaticImportEnabled },
+                    set: onChange
+                ))
+                .labelsHidden()
+                .accessibilityLabel("Automatically import \(volume.displayName) on the next mount")
+            }
+
+            if volume.automaticImportEnabled {
+                Text("Imports automatically on next mount")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Manual import on next mount")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
     }
 }
 

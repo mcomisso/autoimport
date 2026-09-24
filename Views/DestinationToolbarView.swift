@@ -179,7 +179,6 @@ private struct DestinationToolbarControls: View {
             HStack(spacing: 12) {
                 organizationPicker
                 unknownFoldersToggle
-                AutomaticImportToggle(isOn: $store.automaticallyImportDetectedMedia)
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -187,7 +186,6 @@ private struct DestinationToolbarControls: View {
 
                 HStack(spacing: 12) {
                     unknownFoldersToggle
-                    AutomaticImportToggle(isOn: $store.automaticallyImportDetectedMedia)
                 }
             }
         }
@@ -333,15 +331,4 @@ private struct DestinationToolbarControls: View {
         store.destinationAvailability == .unavailable ? .red : .primary
     }
 
-}
-
-private struct AutomaticImportToggle: View {
-    @Binding var isOn: Bool
-
-    var body: some View {
-        Toggle("Auto Import", isOn: $isOn)
-            .toggleStyle(.switch)
-            .frame(width: 145)
-            .help("Automatically import new mounted media when it is detected.")
-    }
 }
