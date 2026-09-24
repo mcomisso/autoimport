@@ -102,7 +102,6 @@ platform :mac do
 
     notarize(
       package: "build/#{APP_NAME}.app",
-      bundle_id: BUNDLE_ID,
       api_key: api_key,
       username: api_key ? nil : ENV["NOTARIZE_APPLE_ID"],
       asc_provider: api_key ? nil : TEAM_ID,
