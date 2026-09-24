@@ -3,6 +3,14 @@
     <channel>
         <title>AutoImport</title>
         <item>
+            <title>0.2.3</title>
+            <pubDate>Thu, 24 Sep 2026 14:06:39 +0100</pubDate>
+            <sparkle:version>9</sparkle:version>
+            <sparkle:shortVersionString>0.2.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/mcomisso/autoimport/releases/download/v0.2.3/AutoImport-0.2.3.dmg" length="5195653" type="application/octet-stream" sparkle:edSignature="kLj94nN5zzolXj4SwzKrIjSC4n5ravVpr9fsKpFRtiNv5HNB3FYFf6eeIGKETP2UgGLbyke/RhQ/KzfQtIEQAg=="/>
+        </item>
+        <item>
             <title>0.2.2</title>
             <pubDate>Sun, 28 Jun 2026 16:17:18 +0100</pubDate>
             <sparkle:version>8</sparkle:version>
@@ -17,14 +25,6 @@
             <sparkle:shortVersionString>0.2.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
             <enclosure url="https://github.com/mcomisso/autoimport/releases/download/v0.2.1/AutoImport-0.2.1.dmg" length="5119479" type="application/octet-stream" sparkle:edSignature="8/RiHerUISCBKTKbWX++pkg4NbAIuHeG9nTR8muAONmXxIbWkNdgjcim4TO7ahe0SUmq3fpc1nXT641MrPupAQ=="/>
-        </item>
-        <item>
-            <title>0.2.0</title>
-            <pubDate>Mon, 22 Jun 2026 00:15:59 +0100</pubDate>
-            <sparkle:version>6</sparkle:version>
-            <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/mcomisso/autoimport/releases/download/v0.2.0/AutoImport-0.2.0.dmg" length="5120548" type="application/octet-stream" sparkle:edSignature="8/vRujgzKpuMXGb1GlQ1ArLSqvnBW0qufLycgAz5Gz3Qs78Y++y5hsTK7ZlFRi5ghSznb+85tiU1zXJbbrb9DA=="/>
         </item>
     </channel>
 </rss>
